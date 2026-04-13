@@ -1,5 +1,5 @@
 """
-engine.py — Gera 1 legenda viral + hashtags. Direto ao ponto.
+engine.py — Legenda viral + hashtags. Direto ao ponto.
 """
 import random, re
 from urllib.parse import urlparse, unquote
@@ -28,7 +28,9 @@ PLAT_RE = {
 }
 
 PLAT_EMOJI = {"tiktok":"🎵","instagram":"📸","youtube":"▶️","kwai":"🎬","pinterest":"📌","shopee":"🛒","facebook":"📘","twitter":"🐦","threads":"🧵","mercadolivre":"🤝"}
-VIDEO_OK = {"tiktok","youtube","twitter","pinterest","facebook","kwai","instagram","threads"}
+
+# SHOPEE ADICIONADO AQUI
+VIDEO_OK = {"tiktok","youtube","twitter","pinterest","facebook","kwai","instagram","threads","shopee"}
 
 def detect_platform(url):
     if not url: return None
@@ -65,5 +67,4 @@ def generate(text):
         f"TODO MUNDO comprando esse {nome} 🛒\n\n+5.000 vendidos ⭐\n\nQuer o link? Comenta 👇",
     ]
 
-    caption = random.choice(captions)
-    return {"caption": caption, "hashtags": tags, "full": f"{caption}\n\n{tags}", "platform": plat, "emoji": PLAT_EMOJI.get(plat,"🔗")}
+    return {"caption": random.choice(captions), "hashtags": tags, "full": f"{random.choice(captions)}\n\n{tags}", "platform": plat, "emoji": PLAT_EMOJI.get(plat,"🔗")}
