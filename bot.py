@@ -1,11 +1,12 @@
 """
-Viral Engine Bot — Download multi-plataforma + legenda viral.
+Viral Engine Bot
 
-TikTok → TikWM API (sem bloqueio, sem marca d'água)
-YouTube/Twitter/Pinterest/Facebook → yt-dlp
-Instagram → embed scraping + yt-dlp fallback
+TikTok     → TikWM API
+Shopee     → Scraper (resolve link + extrai vídeo do CDN)
+Instagram  → Embed scraping + yt-dlp
+YouTube/Twitter/Pinterest/Facebook/Kwai → yt-dlp
 
-Uso: TELEGRAM_BOT_TOKEN=xxx python bot.py
+TELEGRAM_BOT_TOKEN=xxx python bot.py
 """
 
 import os, re, logging, asyncio, subprocess, tempfile, time, json, threading
@@ -27,12 +28,14 @@ TMP = Path(tempfile.gettempdir()) / "vbot"
 TMP.mkdir(exist_ok=True)
 STATS = TMP / "stats.json"
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
 # ── Health ──
-class H(BaseHTTPRequestHandler):
+class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
     def log_message(self, *a): pass
-def http(): HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+def http(): HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
 
 # ── Stats ──
 def load_s():
@@ -46,101 +49,149 @@ def track(uid):
     if uid not in s.get("u",[]): s.setdefault("u",[]).append(uid)
     save_s(s)
 
-# ── yt-dlp update ──
 def update_ytdlp():
     try:
-        subprocess.run(["pip","install","--upgrade","--break-system-packages","yt-dlp"],
-                       capture_output=True, timeout=120)
+        subprocess.run(["pip","install","--upgrade","--break-system-packages","yt-dlp"], capture_output=True, timeout=120)
         v = subprocess.run(["yt-dlp","--version"], capture_output=True, timeout=10)
         log.info(f"yt-dlp: {v.stdout.decode().strip()}")
     except: pass
 
+
 # ════════════════════════════════════════════════════
-# DOWNLOAD — ESTRATÉGIA POR PLATAFORMA
+# DOWNLOADERS POR PLATAFORMA
 # ════════════════════════════════════════════════════
 
-async def download_tiktok(url: str) -> str | None:
-    """TikTok via TikWM API — funciona de qualquer servidor."""
+def _save(content, prefix="vid"):
+    fp = str(TMP / f"{prefix}_{int(time.time())}.mp4")
+    with open(fp, "wb") as f:
+        f.write(content)
+    return fp
+
+
+async def download_shopee(url: str) -> str | None:
+    """Shopee Video — resolve link curto + extrai vídeo do HTML/JSON."""
     try:
-        r = req.post(
-            "https://www.tikwm.com/api/",
-            data={"url": url, "hd": 1},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=30
-        )
+        # 1. Resolver link curto (shp.ee, s.shopee.com.br)
+        session = req.Session()
+        session.headers.update({"User-Agent": UA})
+        r = session.get(url, allow_redirects=True, timeout=15)
+        final_url = r.url
+        html = r.text
+        log.info(f"Shopee URL resolvida: {final_url}")
+
+        # 2. Procurar URL do vídeo no HTML
+        patterns = [
+            # JSON embeddado na página
+            r'"videoUrl"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+            r'"video_url"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+            r'"playUrl"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+            r'"play_url"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+            r'"url"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+            # Tag video no HTML
+            r'<video[^>]+src="(https?://[^"]+)"',
+            r'<source[^>]+src="(https?://[^"]+\.mp4[^"]*)"',
+            # Shopee CDN patterns
+            r'(https?://(?:cf|cv|down)\.shopee\.[^"\'\\]+\.mp4[^"\'\\]*)',
+            r'(https?://(?:videosg|video)[^"\'\\]+shopee[^"\'\\]+\.mp4[^"\'\\]*)',
+            # Genérico - qualquer .mp4 no CDN
+            r'(https?://[^"\'\\\s]+\.mp4(?:\?[^"\'\\\s]*)?)',
+        ]
+
+        video_url = None
+        for pat in patterns:
+            m = re.search(pat, html, re.I)
+            if m:
+                candidate = m.group(1).replace("\\u002F", "/").replace("\\/", "/").replace("\\u0026", "&")
+                # Filtrar URLs que não são vídeos reais
+                if ".mp4" in candidate and "shopee" not in candidate.split("/")[-1][:10]:
+                    video_url = candidate
+                    break
+                elif ".mp4" in candidate:
+                    video_url = candidate
+                    break
+
+        if not video_url:
+            # Tentar encontrar em scripts JSON
+            json_blocks = re.findall(r'<script[^>]*>.*?(\{.*?"mp4".*?\}|.*?"video".*?\}).*?</script>', html, re.S | re.I)
+            for block in json_blocks[:5]:
+                m = re.search(r'(https?://[^"\'\\]+\.mp4[^"\'\\]*)', block)
+                if m:
+                    video_url = m.group(1).replace("\\/", "/").replace("\\u0026", "&")
+                    break
+
+        if not video_url:
+            # Última tentativa: buscar qualquer URL de vídeo na página inteira
+            all_urls = re.findall(r'https?://[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*', html)
+            if all_urls:
+                video_url = all_urls[0].replace("\\/", "/")
+
+        if video_url:
+            log.info(f"Shopee video URL: {video_url[:100]}")
+            vr = req.get(video_url, timeout=60, headers={"User-Agent": UA, "Referer": final_url})
+            if vr.status_code == 200 and len(vr.content) > 10000:
+                log.info(f"Shopee OK: {len(vr.content)//1024}KB")
+                return _save(vr.content, "shopee")
+
+        log.warning("Shopee: nenhuma URL de vídeo encontrada no HTML")
+    except Exception as e:
+        log.warning(f"Shopee erro: {e}")
+    return None
+
+
+async def download_tiktok(url: str) -> str | None:
+    """TikTok via TikWM API."""
+    try:
+        r = req.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1},
+                      headers={"User-Agent": UA}, timeout=30)
         data = r.json()
         if data.get("code") == 0 and data.get("data"):
-            video_url = data["data"].get("hdplay") or data["data"].get("play")
-            if video_url:
-                fp = str(TMP / f"tt_{int(time.time())}.mp4")
-                vr = req.get(video_url, timeout=60, headers={"User-Agent": "okhttp"})
+            vurl = data["data"].get("hdplay") or data["data"].get("play")
+            if vurl:
+                vr = req.get(vurl, timeout=60, headers={"User-Agent": "okhttp"})
                 if vr.status_code == 200 and len(vr.content) > 10000:
-                    with open(fp, "wb") as f:
-                        f.write(vr.content)
                     log.info(f"TikTok OK: {len(vr.content)//1024}KB")
-                    return fp
+                    return _save(vr.content, "tt")
     except Exception as e:
-        log.warning(f"TikWM falhou: {e}")
+        log.warning(f"TikWM: {e}")
     return None
 
 
 async def download_instagram(url: str) -> str | None:
-    """Instagram via embed page scraping."""
+    """Instagram via embed scraping."""
     try:
-        # Tentar extrair do embed
-        shortcode = None
         m = re.search(r'/(p|reel|reels)/([A-Za-z0-9_-]+)', url)
         if m:
-            shortcode = m.group(2)
-
-        if shortcode:
-            embed_url = f"https://www.instagram.com/p/{shortcode}/embed/"
-            r = req.get(embed_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html",
-            }, timeout=15)
-
-            # Procurar URL do vídeo no HTML do embed
-            video_match = re.search(r'"video_url":"([^"]+)"', r.text)
-            if not video_match:
-                video_match = re.search(r'<video[^>]+src="([^"]+)"', r.text)
-
-            if video_match:
-                video_url = video_match.group(1).replace("\\u0026", "&").replace("\\/", "/")
-                fp = str(TMP / f"ig_{int(time.time())}.mp4")
-                vr = req.get(video_url, timeout=60, headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Referer": "https://www.instagram.com/",
-                })
+            sc = m.group(2)
+            r = req.get(f"https://www.instagram.com/p/{sc}/embed/",
+                        headers={"User-Agent": UA, "Accept": "text/html"}, timeout=15)
+            vm = re.search(r'"video_url":"([^"]+)"', r.text)
+            if not vm: vm = re.search(r'<video[^>]+src="([^"]+)"', r.text)
+            if vm:
+                vurl = vm.group(1).replace("\\u0026","&").replace("\\/","/")
+                vr = req.get(vurl, timeout=60, headers={"User-Agent": UA, "Referer": "https://www.instagram.com/"})
                 if vr.status_code == 200 and len(vr.content) > 10000:
-                    with open(fp, "wb") as f:
-                        f.write(vr.content)
                     log.info(f"Instagram OK: {len(vr.content)//1024}KB")
-                    return fp
+                    return _save(vr.content, "ig")
     except Exception as e:
-        log.warning(f"Instagram embed falhou: {e}")
-
-    # Fallback: yt-dlp
+        log.warning(f"Instagram: {e}")
     return await download_ytdlp(url, "instagram")
 
 
 async def download_ytdlp(url: str, plat: str = "") -> str | None:
     """Fallback genérico via yt-dlp."""
-    uid = f"{int(time.time())}_{os.getpid()}"
-    out = str(TMP / f"{uid}.%(ext)s")
+    out = str(TMP / f"{int(time.time())}_{os.getpid()}.%(ext)s")
     cmd = [
         "yt-dlp","--no-warnings","--no-playlist","--no-check-certificates",
         "--max-filesize","49m","--socket-timeout","30","--retries","5",
         "--extractor-retries","3",
         "-f","best[ext=mp4][filesize<49M]/best[ext=mp4]/best[filesize<49M]/best",
         "--merge-output-format","mp4","-o",out,"--print","after_move:filepath",
-        "--user-agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "--user-agent", UA,
     ]
     if plat == "instagram": cmd += ["--add-header","Referer:https://www.instagram.com/"]
     elif plat == "twitter": cmd += ["--add-header","Referer:https://twitter.com/"]
     elif plat == "pinterest": cmd += ["--add-header","Referer:https://www.pinterest.com/"]
     cmd.append(url)
-
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
@@ -149,22 +200,21 @@ async def download_ytdlp(url: str, plat: str = "") -> str | None:
             if fp and os.path.exists(fp):
                 log.info(f"yt-dlp OK: {os.path.getsize(fp)//1024}KB")
                 return fp
-        log.warning(f"yt-dlp falhou: {stderr.decode()[:200]}")
+        log.warning(f"yt-dlp: {stderr.decode()[:200]}")
     except: pass
     return None
 
 
 async def download_video(url: str, plat: str) -> str | None:
-    """Roteador de download — escolhe estratégia por plataforma."""
-    if plat == "tiktok":
+    """Roteador principal — escolhe estratégia por plataforma."""
+    if plat == "shopee":
+        return await download_shopee(url)
+    elif plat == "tiktok":
         fp = await download_tiktok(url)
-        if fp: return fp
-        return await download_ytdlp(url, plat)  # fallback
-
+        return fp or await download_ytdlp(url, plat)
     elif plat == "instagram":
         return await download_instagram(url)
-
-    else:  # youtube, twitter, pinterest, facebook, kwai, threads
+    else:
         return await download_ytdlp(url, plat)
 
 
@@ -195,8 +245,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🚀 *Viral Engine*\n\n"
         "Cole o link do vídeo\\.\n"
         "Eu baixo sem marca d'água e gero legenda \\+ hashtags\\.\n\n"
-        "✅ TikTok \\| YouTube \\| Twitter \\| Pinterest \\| Kwai\n"
-        "⚠️ Instagram \\(público\\)\n\n"
+        "🛒 Shopee Video\n"
+        "🎵 TikTok\n"
+        "▶️ YouTube\n"
+        "🐦 Twitter/X\n"
+        "📌 Pinterest\n"
+        "📘 Facebook\n"
+        "🎬 Kwai\n"
+        "📸 Instagram \\(público\\)\n\n"
         f"_{esc(str(s.get('d',0)))} downloads_\n\n"
         "👇 Manda o link",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -240,14 +296,12 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 try: await status.edit_text("⚠️ Vídeo muito grande (>50MB).")
                 except: pass
-
             cleanup(fp)
             if clean and clean != fp: cleanup(clean)
         else:
             try: await status.edit_text("⚠️ Não consegui baixar. Verifique se o vídeo é público.")
             except: pass
 
-        # Legenda + hashtags
         data = generate(link)
         ctx.user_data["full"] = data["full"]
         ctx.user_data["src"] = link
