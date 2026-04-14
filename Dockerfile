@@ -8,9 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir --upgrade yt-dlp
-
 COPY . .
 
 EXPOSE 10000
-
 CMD ["python", "bot.py"]
