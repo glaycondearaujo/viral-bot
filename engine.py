@@ -1,15 +1,12 @@
-"""
-engine.py — Legenda viral + hashtags. Direto ao ponto.
-"""
 import random, re
 from urllib.parse import urlparse, unquote
 
 H = {
-    "eletronicos": ["#achados","#achadosshopee","#shopee","#shopeebrasil","#comprinhas","#recebidos","#viral","#fyp","#tiktokbrasil","#trending","#tech","#tecnologia","#gadgets","#unboxing","#review","#techtok","#valepena","#custobeneficio","#tiktokmefezcomprar","#produtosvirais","#tiktokshop","#achadosdatiktok"],
-    "moda": ["#moda","#fashion","#outfit","#lookdodia","#estilo","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#modafeminina","#roupabarata","#lookbaratinho","#fashiontiktok","#grwm","#getreadywithme","#outfitideas","#tiktokmefezcomprar","#haul","#comprinhas","#trending"],
-    "beleza": ["#beleza","#beauty","#skincare","#maquiagem","#makeup","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#rotinadebeleza","#beautytok","#beautyhacks","#glowup","#kbeauty","#testando","#recomendo","#antesedepois","#cuidados","#tiktokmefezcomprar","#trending"],
-    "casa": ["#casa","#decoracao","#organizacao","#limpeza","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#casaorganizada","#cozinha","#hometok","#cleantok","#diy","#achados","#utilidades","#hacks","#satisfying","#comprinhas","#tiktokmefezcomprar","#trending"],
-    "geral": ["#shopee","#shopeebrasil","#achadosshopee","#comprinhas","#recebidos","#viral","#fyp","#foryou","#paravoce","#tiktokbrasil","#trending","#ofertas","#desconto","#valepena","#achado","#unboxing","#tiktokmefezcomprar","#produtosvirais","#tiktokshop","#achadosdatiktok","#resenha","#testei"],
+    "eletronicos": ["#achados","#achadosshopee","#shopee","#shopeebrasil","#comprinhas","#recebidos","#viral","#fyp","#tiktokbrasil","#trending","#tech","#tecnologia","#gadgets","#unboxing","#review","#techtok","#valepena","#custobeneficio","#tiktokmefezcomprar","#produtosvirais","#tiktokshop","#achadosdatiktok","#shopeevideo","#achadinhos"],
+    "moda": ["#moda","#fashion","#outfit","#lookdodia","#estilo","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#modafeminina","#roupabarata","#lookbaratinho","#fashiontiktok","#grwm","#getreadywithme","#outfitideas","#tiktokmefezcomprar","#haul","#comprinhas","#trending","#shopeevideo","#achadinhos"],
+    "beleza": ["#beleza","#beauty","#skincare","#maquiagem","#makeup","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#rotinadebeleza","#beautytok","#beautyhacks","#glowup","#kbeauty","#testando","#recomendo","#antesedepois","#cuidados","#tiktokmefezcomprar","#trending","#shopeevideo","#achadinhos"],
+    "casa": ["#casa","#decoracao","#organizacao","#limpeza","#shopee","#shopeebrasil","#achadosshopee","#viral","#fyp","#tiktokbrasil","#casaorganizada","#cozinha","#hometok","#cleantok","#diy","#achados","#utilidades","#hacks","#satisfying","#comprinhas","#tiktokmefezcomprar","#trending","#shopeevideo","#achadinhos"],
+    "geral": ["#shopee","#shopeebrasil","#achadosshopee","#comprinhas","#recebidos","#viral","#fyp","#foryou","#paravoce","#tiktokbrasil","#trending","#ofertas","#desconto","#valepena","#achado","#unboxing","#tiktokmefezcomprar","#produtosvirais","#tiktokshop","#achadosdatiktok","#resenha","#testei","#shopeevideo","#achadinhos"],
 }
 
 CAT_RE = {
@@ -20,16 +17,18 @@ CAT_RE = {
 }
 
 PLAT_RE = {
-    "tiktok":r"tiktok\.com|vm\.tiktok|vt\.tiktok","instagram":r"instagram\.com|instagr\.am",
-    "youtube":r"youtube\.com|youtu\.be","kwai":r"kwai\.com|kw\.ai",
-    "pinterest":r"pinterest\.com|pin\.it","shopee":r"shopee\.com|shp\.ee|s\.shopee",
-    "facebook":r"facebook\.com|fb\.watch","twitter":r"twitter\.com|x\.com|t\.co",
-    "threads":r"threads\.net","mercadolivre":r"mercadolivre\.com",
+    "tiktok":r"tiktok\.com|vm\.tiktok|vt\.tiktok",
+    "instagram":r"instagram\.com|instagr\.am",
+    "youtube":r"youtube\.com|youtu\.be",
+    "kwai":r"kwai\.com|kw\.ai",
+    "pinterest":r"pinterest\.com|pin\.it",
+    "shopee":r"shopee\.com|shp\.ee|s\.shopee",
+    "facebook":r"facebook\.com|fb\.watch",
+    "twitter":r"twitter\.com|x\.com|t\.co",
+    "threads":r"threads\.net",
 }
 
-PLAT_EMOJI = {"tiktok":"🎵","instagram":"📸","youtube":"▶️","kwai":"🎬","pinterest":"📌","shopee":"🛒","facebook":"📘","twitter":"🐦","threads":"🧵","mercadolivre":"🤝"}
-
-# SHOPEE ADICIONADO AQUI
+PLAT_EMOJI = {"tiktok":"🎵","instagram":"📸","youtube":"▶️","kwai":"🎬","pinterest":"📌","shopee":"🛒","facebook":"📘","twitter":"🐦","threads":"🧵"}
 VIDEO_OK = {"tiktok","youtube","twitter","pinterest","facebook","kwai","instagram","threads","shopee"}
 
 def detect_platform(url):
@@ -40,12 +39,12 @@ def detect_platform(url):
 
 def can_download(plat): return plat in VIDEO_OK
 
-def _detect_cat(text):
+def _cat(text):
     for k,p in CAT_RE.items():
         if re.search(p, text.lower(), re.I): return k
     return "geral"
 
-def _extract_name(text):
+def _name(text):
     if re.match(r'https?://', text, re.I):
         try:
             path = unquote(urlparse(text).pathname)
@@ -55,16 +54,15 @@ def _extract_name(text):
     return text[:50]
 
 def generate(text):
-    nome = _extract_name(text.strip())
-    cat = _detect_cat(nome)
+    nome = _name(text.strip())
+    cat = _cat(nome)
     plat = detect_platform(text) if re.match(r'https?://', text.strip(), re.I) else None
-    tags = " ".join(random.sample(H.get(cat, H["geral"]), 18))
-
+    tags = " ".join(random.sample(H.get(cat, H["geral"]), min(20, len(H.get(cat, H["geral"])))))
     captions = [
         f"🔥 {nome} — achado INCRÍVEL da Shopee!\n\n✅ Qualidade surreal\n✅ Entrega rápida\n⏰ Corre antes que acabe!\n\n🔗 Link na bio",
         f"👀 Olha o que achei na Shopee!\n\n{nome} com preço ABSURDO 🤯\n\nComenta \"QUERO\" que mando o link 💬",
         f"⚠️ ACHADO DO DIA\n\n{nome} — qualidade premium, preço de Shopee 🔥\n\nSalva esse post! 🔖\n🔗 Link nos comentários",
         f"TODO MUNDO comprando esse {nome} 🛒\n\n+5.000 vendidos ⭐\n\nQuer o link? Comenta 👇",
     ]
-
-    return {"caption": random.choice(captions), "hashtags": tags, "full": f"{random.choice(captions)}\n\n{tags}", "platform": plat, "emoji": PLAT_EMOJI.get(plat,"🔗")}
+    cap = random.choice(captions)
+    return {"caption": cap, "hashtags": tags, "full": f"{cap}\n\n{tags}", "platform": plat, "emoji": PLAT_EMOJI.get(plat,"🔗")}
