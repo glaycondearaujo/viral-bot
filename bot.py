@@ -207,7 +207,11 @@ async def dl_ytdlp(url, plat=""):
     return None
 
 async def download_video(url, plat):
-    if plat == "shopee": return await dl_shopee(url)
+    if plat == "shopee":
+        fp = await dl_shopee(url)
+        if not fp:  # fallback: yt-dlp
+            fp = await dl_ytdlp(url, "shopee")
+        return fp
     if plat == "tiktok": return await dl_tiktok(url)
     if plat == "instagram": return await dl_instagram(url)
     return await dl_ytdlp(url, plat)
@@ -219,6 +223,70 @@ def strip_meta(src):
         if r.returncode == 0 and os.path.exists(dst): return dst
     except: pass
     return src
+
+def remove_watermark(src: str, platform: str) -> str:
+    """Remove marca d'água da Shopee usando FFmpeg delogo filter."""
+    if platform != "shopee":
+        return src
+
+    dst = src.rsplit(".",1)[0] + "_nowm.mp4"
+    try:
+        # Pegar dimensões do vídeo
+        probe = subprocess.run(
+            ["ffprobe","-v","quiet","-select_streams","v:0",
+             "-show_entries","stream=width,height","-of","csv=p=0",src],
+            capture_output=True, timeout=15
+        )
+        dims = probe.stdout.decode().strip().split(",")
+        if len(dims) < 2:
+            return src
+        w, h = int(dims[0]), int(dims[1])
+
+        # Posição da marca d'água ShopeeVideo — canto inferior esquerdo
+        # Cobre logo "ShopeeVideo" + username
+        wm_x = 0
+        wm_y = int(h * 0.82)       # começa em ~82% da altura
+        wm_w = int(w * 0.45)       # ~45% da largura
+        wm_h = int(h * 0.14)       # ~14% da altura
+
+        # Texto superior direito (marca d'água do criador) — opcional
+        # Posição: canto superior direito
+        wm2_x = int(w * 0.55)
+        wm2_y = 0
+        wm2_w = int(w * 0.45)
+        wm2_h = int(h * 0.08)
+
+        log.info(f"Removendo watermark: {w}x{h} → delogo({wm_x},{wm_y},{wm_w},{wm_h})")
+
+        # Aplicar delogo na região inferior esquerda (ShopeeVideo + username)
+        # + região superior direita (texto do criador, se houver)
+        vf = (
+            f"delogo=x={wm_x}:y={wm_y}:w={wm_w}:h={wm_h}:show=0,"
+            f"delogo=x={wm2_x}:y={wm2_y}:w={wm2_w}:h={wm2_h}:show=0"
+        )
+
+        r = subprocess.run([
+            "ffmpeg", "-y", "-i", src,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "copy",
+            "-map_metadata", "-1",
+            "-movflags", "+faststart",
+            dst
+        ], capture_output=True, timeout=300)
+
+        if r.returncode == 0 and os.path.exists(dst):
+            new_sz = os.path.getsize(dst)
+            if new_sz > 50000:  # arquivo válido
+                log.info(f"Watermark removida: {os.path.getsize(src)//1024}KB → {new_sz//1024}KB")
+                return dst
+
+        log.warning(f"delogo falhou: {r.stderr.decode()[:200]}")
+    except Exception as e:
+        log.warning(f"Watermark removal erro: {e}")
+
+    return src
+
 
 def compress(src, target=45):
     sz = os.path.getsize(src)/(1024*1024)
@@ -272,8 +340,15 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fp = await download_video(link, plat)
 
         if fp:
-            cleaned = strip_meta(fp)
-            final = cleaned if cleaned != fp else fp
+            # REMOVER MARCA D'ÁGUA (Shopee)
+            if plat == "shopee":
+                try: await status.edit_text("🧹 Removendo marca d'água...")
+                except: pass
+            nowm = remove_watermark(fp, plat)
+            src = nowm if nowm != fp else fp
+
+            cleaned = strip_meta(src)
+            final = cleaned if cleaned != src else src
             sz = os.path.getsize(final)/(1024*1024)
             if sz > 49:
                 try: await status.edit_text(f"🗜 Comprimindo ({sz:.0f}MB)...")
@@ -294,8 +369,9 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 try: await status.edit_text(f"⚠️ Vídeo muito grande ({sz:.0f}MB).")
                 except: pass
             cleanup(fp)
-            if cleaned != fp: cleanup(cleaned)
-            if final != fp and final != cleaned: cleanup(final)
+            if nowm and nowm != fp: cleanup(nowm)
+            if cleaned and cleaned != fp and cleaned != nowm: cleanup(cleaned)
+            if final != fp and final != nowm and final != cleaned: cleanup(final)
         else:
             try: await status.edit_text("⚠️ Não consegui baixar. Verifique se o vídeo é público.")
             except: pass
