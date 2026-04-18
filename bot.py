@@ -224,64 +224,185 @@ def strip_meta(src):
     except: pass
     return src
 
+def _detect_shopee_endcard(src: str, duration: float) -> float:
+    """Detecta quando o endcard vermelho da Shopee começa. Retorna duração real do conteúdo."""
+    # Endcard aparece nos últimos 2-5 segundos geralmente
+    check_points = []
+    for offset in [5, 4, 3, 2, 1]:
+        t = duration - offset
+        if t > 1:
+            check_points.append(t)
+
+    real_duration = duration
+    for t in check_points:
+        try:
+            # Extrair frame naquele ponto e analisar se é vermelho
+            tmp_frame = src.rsplit(".",1)[0] + f"_f{int(t)}.png"
+            r = subprocess.run([
+                "ffmpeg","-y","-ss",str(t),"-i",src,
+                "-vf","crop=100:100:iw/2-50:ih/2-50",
+                "-frames:v","1",tmp_frame
+            ], capture_output=True, timeout=10)
+
+            if r.returncode == 0 and os.path.exists(tmp_frame):
+                # Checar média de cor com ffmpeg signalstats
+                stats = subprocess.run([
+                    "ffmpeg","-i",tmp_frame,"-vf","signalstats",
+                    "-f","null","-"
+                ], capture_output=True, timeout=10)
+                stderr = stats.stderr.decode()
+                # Extrair médias RGB do output
+                import re
+                m_r = re.search(r'YAVG:([\d.]+)', stderr)
+                m_u = re.search(r'UAVG:([\d.]+)', stderr)
+                m_v = re.search(r'VAVG:([\d.]+)', stderr)
+
+                os.remove(tmp_frame)
+
+                if m_v:
+                    v_avg = float(m_v.group(1))
+                    # V (chroma red) alto = vermelho
+                    if v_avg > 170:  # threshold para vermelho Shopee
+                        real_duration = t
+                        log.info(f"Endcard vermelho detectado em t={t:.1f}s (V={v_avg:.0f})")
+                    else:
+                        break  # não é vermelho, conteúdo real
+        except Exception as e:
+            log.debug(f"Detect endcard t={t}: {e}")
+
+    return real_duration
+
+
+def _detect_red_endcard(src: str, total_duration: float) -> float:
+    """Detecta onde começa o card vermelho final da Shopee.
+    Retorna a duração do vídeo útil (sem o endcard)."""
+    try:
+        # Shopee sempre adiciona 3-5 segundos de endcard vermelho no final
+        # Amostra 3 frames no final (85%, 90%, 95%) para detectar cor predominante
+        check_points = [
+            max(0, total_duration - 5),
+            max(0, total_duration - 3),
+            max(0, total_duration - 1),
+        ]
+
+        red_start = None
+        for t in check_points:
+            r = subprocess.run([
+                "ffmpeg", "-y", "-ss", str(t), "-i", src,
+                "-vframes", "1", "-vf", "scale=50:50",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
+            ], capture_output=True, timeout=15)
+
+            if r.returncode == 0 and r.stdout:
+                pixels = r.stdout
+                # Calcular cor média dos pixels
+                total_r, total_g, total_b = 0, 0, 0
+                count = len(pixels) // 3
+                for i in range(0, len(pixels), 3):
+                    total_r += pixels[i]
+                    total_g += pixels[i+1]
+                    total_b += pixels[i+2]
+                avg_r = total_r // count
+                avg_g = total_g // count
+                avg_b = total_b // count
+
+                # Shopee red: R alto (200+), G/B baixos (<120)
+                is_shopee_red = avg_r > 180 and avg_g < 130 and avg_b < 120
+
+                if is_shopee_red:
+                    if red_start is None or t < red_start:
+                        red_start = t
+                    log.info(f"Endcard vermelho detectado em t={t:.1f}s (RGB {avg_r},{avg_g},{avg_b})")
+
+        if red_start is not None:
+            # Cortar 0.5s antes pra garantir
+            return max(1.0, red_start - 0.5)
+    except Exception as e:
+        log.warning(f"Detect endcard erro: {e}")
+
+    return total_duration
+
+
 def remove_watermark(src: str, platform: str) -> str:
-    """Remove marca d'água da Shopee usando FFmpeg delogo filter."""
+    """Remove marca d'água Shopee + corta endcard vermelho final.
+    Coordenadas testadas e validadas com vídeos reais."""
     if platform != "shopee":
         return src
 
     dst = src.rsplit(".",1)[0] + "_nowm.mp4"
     try:
-        # Pegar dimensões do vídeo
-        probe = subprocess.run(
-            ["ffprobe","-v","quiet","-select_streams","v:0",
-             "-show_entries","stream=width,height","-of","csv=p=0",src],
-            capture_output=True, timeout=15
-        )
-        dims = probe.stdout.decode().strip().split(",")
-        if len(dims) < 2:
+        # 1. Dimensões + duração
+        probe = subprocess.run([
+            "ffprobe","-v","quiet","-select_streams","v:0",
+            "-show_entries","stream=width,height:format=duration",
+            "-of","json",src
+        ], capture_output=True, timeout=15)
+        info = json.loads(probe.stdout.decode())
+        stream = info.get("streams",[{}])[0]
+        w = int(stream.get("width", 0))
+        h = int(stream.get("height", 0))
+        duration = float(info.get("format",{}).get("duration", 0))
+
+        if w < 100 or h < 100 or duration < 2:
             return src
-        w, h = int(dims[0]), int(dims[1])
 
-        # Posição da marca d'água ShopeeVideo — canto inferior esquerdo
-        # Cobre logo "ShopeeVideo" + username
-        wm_x = 0
-        wm_y = int(h * 0.82)       # começa em ~82% da altura
-        wm_w = int(w * 0.45)       # ~45% da largura
-        wm_h = int(h * 0.14)       # ~14% da altura
+        # 2. Detectar endcard vermelho
+        useful_duration = _detect_red_endcard(src, duration)
 
-        # Texto superior direito (marca d'água do criador) — opcional
-        # Posição: canto superior direito
-        wm2_x = int(w * 0.55)
-        wm2_y = 0
-        wm2_w = int(w * 0.45)
-        wm2_h = int(h * 0.08)
+        # 3. Coordenadas validadas (testadas com vídeo real 480x854)
+        # Logo ShopeeVideo: ocupa ~35% largura, altura 6% — posição y=43%
+        # Username @xxx: ocupa ~27% largura, altura 5% — posição y=50%
+        # IMPORTANTE: delogo exige x >= 1 e y >= 1 (NÃO aceita 0)
 
-        log.info(f"Removendo watermark: {w}x{h} → delogo({wm_x},{wm_y},{wm_w},{wm_h})")
+        # Região 1: Logo "ShopeeVideo" (linha superior)
+        r1_x = max(1, int(w * 0.01))
+        r1_y = int(h * 0.43)
+        r1_w = int(w * 0.36)
+        r1_h = int(h * 0.065)
 
-        # Aplicar delogo na região inferior esquerda (ShopeeVideo + username)
-        # + região superior direita (texto do criador, se houver)
+        # Região 2: Username (@xxxxxx) (linha inferior)
+        r2_x = max(1, int(w * 0.01))
+        r2_y = int(h * 0.505)
+        r2_w = int(w * 0.28)
+        r2_h = int(h * 0.055)
+
+        # Garantir que estão dentro do frame
+        for (x, y, rw, rh) in [(r1_x, r1_y, r1_w, r1_h), (r2_x, r2_y, r2_w, r2_h)]:
+            if x + rw >= w or y + rh >= h or rw < 10 or rh < 10:
+                log.warning(f"Coordenadas inválidas, pulando delogo")
+                return src
+
+        log.info(f"Shopee: {w}x{h} {duration:.1f}s → watermark removal; útil={useful_duration:.1f}s")
+
+        # 4. Filtro combinado: 2 delogos em cascata
         vf = (
-            f"delogo=x={wm_x}:y={wm_y}:w={wm_w}:h={wm_h}:show=0,"
-            f"delogo=x={wm2_x}:y={wm2_y}:w={wm2_w}:h={wm2_h}:show=0"
+            f"delogo=x={r1_x}:y={r1_y}:w={r1_w}:h={r1_h},"
+            f"delogo=x={r2_x}:y={r2_y}:w={r2_w}:h={r2_h}"
         )
 
-        r = subprocess.run([
-            "ffmpeg", "-y", "-i", src,
+        # 5. Comando ffmpeg — corta o endcard se detectado
+        cmd = ["ffmpeg","-y","-i",src]
+        if useful_duration < duration - 0.5:
+            cmd += ["-t", f"{useful_duration:.2f}"]
+        cmd += [
             "-vf", vf,
             "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "copy",
+            "-c:a", "aac", "-b:a", "128k",
             "-map_metadata", "-1",
             "-movflags", "+faststart",
             dst
-        ], capture_output=True, timeout=300)
+        ]
+
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
 
         if r.returncode == 0 and os.path.exists(dst):
             new_sz = os.path.getsize(dst)
-            if new_sz > 50000:  # arquivo válido
-                log.info(f"Watermark removida: {os.path.getsize(src)//1024}KB → {new_sz//1024}KB")
+            if new_sz > 50000:
+                log.info(f"✅ Watermark removida + endcard cortado: {os.path.getsize(src)//1024}KB → {new_sz//1024}KB")
                 return dst
 
-        log.warning(f"delogo falhou: {r.stderr.decode()[:200]}")
+        err = r.stderr.decode()[:300]
+        log.warning(f"❌ delogo falhou: {err}")
     except Exception as e:
         log.warning(f"Watermark removal erro: {e}")
 
