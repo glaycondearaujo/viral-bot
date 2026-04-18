@@ -1,17 +1,12 @@
 """
-Viral Engine Bot
-
-Shopee: 4 camadas (API/HTML/og:video/mobile)
-TikTok: TikWM API
-YouTube/Twitter/Pinterest/Facebook/Kwai: yt-dlp
-Instagram: embed + yt-dlp
-
-TELEGRAM_BOT_TOKEN=xxx python bot.py
+Viral Engine Bot — Download sem marca d'água + Legenda viral
+Extração via APIs nativas de cada plataforma.
 """
 
 import os, re, logging, asyncio, subprocess, tempfile, time, json, threading
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs, unquote
 import requests as req
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -27,15 +22,21 @@ PORT = int(os.environ.get("PORT", "10000"))
 TMP = Path(tempfile.gettempdir()) / "vbot"
 TMP.mkdir(exist_ok=True)
 STATS = TMP / "stats.json"
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 UA_M = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+UA_SHOPEE = "Android app Shopeee appver=31600 platform=native"
 
+
+# ── Servidor HTTP (Render) ──
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
     def log_message(self, *a): pass
 def start_http(): HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
 
+
+# ── Estatísticas ──
 def load_s():
     try: return json.loads(STATS.read_text()) if STATS.exists() else {"d":0,"u":[]}
     except: return {"d":0,"u":[]}
@@ -43,162 +44,296 @@ def save_s(s):
     try: STATS.write_text(json.dumps(s))
     except: pass
 def track(uid):
-    s=load_s(); s["d"]=s.get("d",0)+1
+    s = load_s(); s["d"] = s.get("d",0)+1
     if uid not in s.get("u",[]): s.setdefault("u",[]).append(uid)
     save_s(s)
+
 
 def update_ytdlp():
     try: subprocess.run(["pip","install","--upgrade","--break-system-packages","yt-dlp"], capture_output=True, timeout=120)
     except: pass
+
 
 def _save(data, prefix="vid"):
     fp = str(TMP / f"{prefix}_{int(time.time())}_{os.getpid()}.mp4")
     with open(fp, "wb") as f: f.write(data)
     return fp
 
-def _dl(url, headers=None):
+
+def _dl(url, headers=None, min_size=50000):
+    """Baixa URL direta com headers. Retorna bytes ou None."""
     try:
         h = {"User-Agent": UA}
         if headers: h.update(headers)
-        r = req.get(url, headers=h, timeout=120, allow_redirects=True)
-        if r.status_code == 200 and len(r.content) > 50000: return r.content
-    except: pass
-    return None
-
-# ════════════════════════════════════════════════════
-# SHOPEE — 4 CAMADAS
-# ════════════════════════════════════════════════════
-
-def _resolve(url):
-    try: return req.get(url, headers={"User-Agent": UA_M}, allow_redirects=True, timeout=15).url
-    except: return url
-
-def _shopee_api(url):
-    m = re.search(r'i\.(\d+)\.(\d+)', url)
-    if not m:
-        m = re.search(r'/product/(\d+)/(\d+)', url)
-    if not m: return None
-    sid, iid = m.group(1), m.group(2)
-    log.info(f"Shopee API: shop={sid} item={iid}")
-    try:
-        r = req.get(f"https://shopee.com.br/api/v4/pdp/get_pc?shop_id={sid}&item_id={iid}",
-            headers={"User-Agent":UA,"Referer":url,"x-shopee-language":"pt-BR"}, timeout=15)
+        r = req.get(url, headers=h, timeout=180, allow_redirects=True, stream=True)
         if r.status_code == 200:
-            item = r.json().get("data",{}).get("item",{})
-            for v in item.get("video_info_list",[]):
-                for k in ["video_url","url","default_format"]:
-                    u = v.get(k)
-                    if isinstance(u,dict): u = u.get("url")
-                    if u and ("mp4" in u or "video" in u):
-                        log.info(f"Shopee API OK: {u[:60]}"); return u
-            vid = item.get("video")
-            if vid:
-                u = vid if isinstance(vid,str) else vid.get("video_url","")
-                if u: return u
-    except Exception as e: log.warning(f"Shopee API: {e}")
+            content = r.content
+            if len(content) > min_size:
+                return content
+    except Exception as e:
+        log.warning(f"_dl erro: {e}")
     return None
 
-def _shopee_html(url, html):
-    pats = [
-        r'"(?:video_url|videoUrl|playUrl|play_url)"\s*:\s*"(https?://[^"]+)"',
-        r'(https?://(?:cf|cv|down)[^"\'\\\s]+shopee[^"\'\\\s]*\.mp4[^"\'\\\s]*)',
-        r'(https?://[^"\'\\\s]*susercontent\.com[^"\'\\\s]*\.mp4[^"\'\\\s]*)',
-        r'"(https?://[^"]+\.mp4(?:\?[^"]*)?)"',
-        r'<video[^>]+src=["\']([^"\']+)["\']',
-        r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']',
-    ]
-    for p in pats:
-        for m in re.findall(p, html, re.I):
-            c = m.replace("\\u002F","/").replace("\\/","/").replace("\\u0026","&")
-            if len(c)<20: continue
-            if any(x in c.lower() for x in ["thumb","image","jpg","png","gif","webp"]): continue
-            log.info(f"Shopee HTML: {c[:60]}"); return c
-    return None
 
-def _shopee_og(html):
-    m = re.search(r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+)', html, re.I)
-    if not m: m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video', html, re.I)
-    if m:
-        u = m.group(1).replace("&amp;","&")
-        log.info(f"Shopee OG: {u[:60]}"); return u
-    return None
+# ════════════════════════════════════════════════════
+# SHOPEE VIDEO — extração do vídeo ORIGINAL sem marca d'água
+# ════════════════════════════════════════════════════
 
-def _shopee_mobile(url):
+def _shopee_resolve(url):
+    """Resolve links curtos (s.shopee.com.br, shp.ee) seguindo redirects."""
     try:
-        r = req.get(url, headers={"User-Agent":UA_M,"Accept-Language":"pt-BR"}, timeout=15, allow_redirects=True)
-        for p in [r'"(?:video_url|videoUrl|playUrl)"\s*:\s*"(https?://[^"]+)"', r'"(https?://[^"]+\.mp4[^"]*)"']:
-            for m in re.findall(p, r.text, re.I):
-                c = m.replace("\\u002F","/").replace("\\/","/").replace("\\u0026","&")
-                if len(c)<20 or any(x in c.lower() for x in ["thumb","jpg","png"]): continue
-                log.info(f"Shopee Mobile: {c[:60]}"); return c
+        r = req.get(url, headers={"User-Agent": UA_M}, allow_redirects=True, timeout=20)
+        return r.url, r.text
+    except Exception as e:
+        log.warning(f"Resolve erro: {e}")
+    return url, ""
+
+
+def _shopee_extract_vid(url):
+    """Extrai o ID do vídeo de uma URL Shopee Video."""
+    # Padrões comuns:
+    # https://sv.shopee.com.br/share-video/9834756482
+    # https://shopee.com.br/video/9834756482
+    # https://shopee.com.br/universal-link?redir=...video...
+    patterns = [
+        r'share-video/(\d+)',
+        r'/video/(\d+)',
+        r'videoId=(\d+)',
+        r'vid=(\d+)',
+        r'video_id[=/](\d+)',
+        r'sv[./](\d{10,})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, url, re.I)
+        if m: return m.group(1)
+
+    # universal-link com redir
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        if 'redir' in qs:
+            redir = unquote(qs['redir'][0])
+            for pat in patterns:
+                m = re.search(pat, redir, re.I)
+                if m: return m.group(1)
     except: pass
     return None
+
+
+def _shopee_video_api(vid):
+    """Chama endpoints oficiais da Shopee Video para pegar o MP4 original."""
+    if not vid: return None
+
+    # Endpoints que servem o vídeo SEM marca d'água (usado pelo app mobile)
+    endpoints = [
+        f"https://sv.shopee.com.br/api/v1/share/video/{vid}",
+        f"https://sv.shopee.com.br/api/v1/video/detail?video_id={vid}",
+        f"https://shopee.com.br/api/v4/sv/video_detail?video_id={vid}",
+        f"https://shopee.com.br/api/v4/shop_video/get_video_info?video_id={vid}",
+        f"https://sv-mms-live-br.shopee.com.br/api/v1/video/{vid}",
+    ]
+
+    for ep in endpoints:
+        try:
+            r = req.get(ep, headers={
+                "User-Agent": UA_SHOPEE,
+                "Accept": "application/json",
+                "Referer": "https://shopee.com.br/",
+                "X-Shopee-Language": "pt-BR",
+                "X-API-SOURCE": "pc",
+            }, timeout=15)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    vurl = _dig_video_url(data)
+                    if vurl:
+                        log.info(f"Shopee API {ep[:40]}... OK: {vurl[:80]}")
+                        return vurl
+                except: pass
+        except Exception as e:
+            log.debug(f"Endpoint {ep[:40]}: {e}")
+    return None
+
+
+def _dig_video_url(obj, depth=0):
+    """Busca recursiva por URLs de vídeo em um JSON."""
+    if depth > 10: return None
+    if isinstance(obj, str):
+        if obj.startswith("http") and (".mp4" in obj or "/video/" in obj or "/mms/" in obj):
+            if not any(x in obj.lower() for x in ["thumb","cover","preview",".jpg",".png",".webp"]):
+                return obj
+        return None
+    if isinstance(obj, dict):
+        # Chaves prioritárias
+        priority = ["default_format","video_url","play_url","playUrl","playAddr",
+                    "url","download_url","hd_url","video","mms_url","cdn_url","src"]
+        for k in priority:
+            if k in obj:
+                v = obj[k]
+                if isinstance(v, (str, dict, list)):
+                    found = _dig_video_url(v, depth+1)
+                    if found: return found
+        # Depois busca em todos os campos
+        for v in obj.values():
+            found = _dig_video_url(v, depth+1)
+            if found: return found
+    if isinstance(obj, list):
+        for item in obj:
+            found = _dig_video_url(item, depth+1)
+            if found: return found
+    return None
+
+
+def _shopee_html_extract(html, final_url):
+    """Extrai URL do vídeo do HTML (próxima camada de fallback)."""
+    # 1. Buscar JSON embeddado com vídeo
+    for pat in [
+        r'"default_format"\s*:\s*\{[^}]*"url"\s*:\s*"([^"]+)"',
+        r'"play_url"\s*:\s*"([^"]+)"',
+        r'"video_url"\s*:\s*"([^"]+)"',
+        r'"playUrl"\s*:\s*"([^"]+)"',
+        r'"mms_url"\s*:\s*"([^"]+)"',
+        r'"hd_url"\s*:\s*"([^"]+)"',
+        r'"cdn_url"\s*:\s*"([^"]+\.mp4[^"]*)"',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            u = m.group(1).replace("\\u002F","/").replace("\\/","/").replace("\\u0026","&")
+            if len(u) > 20 and ".mp4" in u:
+                log.info(f"Shopee HTML extract: {u[:80]}")
+                return u
+
+    # 2. og:video / twitter:video
+    for pat in [
+        r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+name=["\']twitter:video(?::url)?["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+\.mp4[^"\']*)["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            u = m.group(1).replace("&amp;","&")
+            if ".mp4" in u:
+                log.info(f"Shopee meta: {u[:80]}"); return u
+
+    # 3. URLs diretas de .mp4 no HTML
+    urls = re.findall(r'https?://[^\s"\'<>\\]+\.mp4(?:\?[^\s"\'<>\\]*)?', html)
+    for u in urls:
+        if not any(x in u.lower() for x in ["thumb","cover","preview"]):
+            log.info(f"Shopee direct mp4: {u[:80]}"); return u
+
+    return None
+
 
 async def dl_shopee(url):
-    resolved = _resolve(url)
-    log.info(f"Shopee: {url} → {resolved}")
-    html = ""
-    try: html = req.get(resolved, headers={"User-Agent":UA}, timeout=15).text
-    except: pass
+    """Download Shopee Video SEM marca d'água — estratégia multi-camada."""
+    log.info(f"Shopee: iniciando {url}")
 
-    for layer_fn, args in [
-        (_shopee_api, (resolved,)),
-        (_shopee_html, (resolved, html)),
-        (_shopee_og, (html,)),
-        (_shopee_mobile, (resolved,)),
-    ]:
-        if not args[-1]: continue  # skip if no html
-        vurl = layer_fn(*args)
-        if vurl:
-            content = _dl(vurl, {"Referer": resolved})
-            if content:
-                log.info(f"Shopee download OK: {len(content)//1024}KB")
-                return _save(content, "shopee")
-    log.warning("Shopee: todas as camadas falharam")
+    # 1. Resolver link curto
+    final_url, html = _shopee_resolve(url)
+    log.info(f"Shopee: resolvido → {final_url[:100]}")
+
+    # 2. Extrair video ID da URL
+    vid = _shopee_extract_vid(final_url) or _shopee_extract_vid(url)
+    if not vid:
+        # Tentar extrair do HTML
+        m = re.search(r'"video_?id"\s*:\s*"?(\d{10,})', html)
+        if m: vid = m.group(1)
+    log.info(f"Shopee: video_id = {vid}")
+
+    # 3. Tentar endpoints da API (retornam vídeo ORIGINAL sem marca d'água)
+    vurl = None
+    if vid:
+        vurl = _shopee_video_api(vid)
+
+    # 4. Fallback: extração do HTML
+    if not vurl and html:
+        vurl = _shopee_html_extract(html, final_url)
+
+    # 5. Fallback: requisição mobile do HTML final
+    if not vurl:
+        try:
+            r = req.get(final_url, headers={"User-Agent": UA_M}, timeout=15)
+            vurl = _shopee_html_extract(r.text, final_url)
+        except: pass
+
+    # 6. Download do vídeo
+    if vurl:
+        content = _dl(vurl, headers={"Referer": final_url, "User-Agent": UA_M})
+        if content:
+            log.info(f"Shopee download OK: {len(content)//1024}KB")
+            return _save(content, "shopee")
+
+    log.warning(f"Shopee: falhou (vid={vid}, vurl={vurl})")
     return None
 
+
 # ════════════════════════════════════════════════════
-# OUTROS
+# TIKTOK — TikWM API (vídeo sem marca d'água)
 # ════════════════════════════════════════════════════
 
 async def dl_tiktok(url):
-    try:
-        r = req.post("https://www.tikwm.com/api/", data={"url":url,"hd":1}, headers={"User-Agent":UA}, timeout=30)
-        d = r.json()
-        if d.get("code")==0 and d.get("data"):
-            u = d["data"].get("hdplay") or d["data"].get("play")
-            if u:
-                c = _dl(u, {"User-Agent":"okhttp"})
-                if c: return _save(c, "tt")
-    except: pass
+    for endpoint in ["https://www.tikwm.com/api/", "https://tikwm.com/api/"]:
+        try:
+            r = req.post(endpoint, data={"url":url,"hd":1},
+                         headers={"User-Agent":UA}, timeout=30)
+            d = r.json()
+            if d.get("code") == 0 and d.get("data"):
+                u = d["data"].get("hdplay") or d["data"].get("play")
+                if u:
+                    c = _dl(u, {"User-Agent": "okhttp"})
+                    if c:
+                        log.info(f"TikTok OK: {len(c)//1024}KB")
+                        return _save(c, "tt")
+        except Exception as e:
+            log.warning(f"TikWM {endpoint}: {e}")
     return await dl_ytdlp(url, "tiktok")
+
+
+# ════════════════════════════════════════════════════
+# INSTAGRAM — embed scraping
+# ════════════════════════════════════════════════════
 
 async def dl_instagram(url):
     try:
-        m = re.search(r'/(p|reel|reels)/([A-Za-z0-9_-]+)', url)
+        m = re.search(r'/(p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
         if m:
-            r = req.get(f"https://www.instagram.com/p/{m.group(2)}/embed/", headers={"User-Agent":UA}, timeout=15)
-            vm = re.search(r'"video_url"\s*:\s*"([^"]+)"', r.text)
-            if not vm: vm = re.search(r'<video[^>]+src="([^"]+)"', r.text)
-            if vm:
-                u = vm.group(1).replace("\\u0026","&").replace("\\/","/")
-                c = _dl(u, {"Referer":"https://www.instagram.com/"})
-                if c: return _save(c, "ig")
-    except: pass
+            sc = m.group(2)
+            for embed in [f"https://www.instagram.com/p/{sc}/embed/",
+                          f"https://www.instagram.com/reel/{sc}/embed/"]:
+                r = req.get(embed, headers={"User-Agent": UA}, timeout=15)
+                for pat in [r'"video_url"\s*:\s*"([^"]+)"',
+                            r'<video[^>]+src="([^"]+)"',
+                            r'property="og:video"[^>]*content="([^"]+)"']:
+                    vm = re.search(pat, r.text)
+                    if vm:
+                        u = vm.group(1).replace("\\u0026","&").replace("\\/","/").replace("&amp;","&")
+                        c = _dl(u, {"Referer": "https://www.instagram.com/"})
+                        if c:
+                            log.info(f"IG OK: {len(c)//1024}KB")
+                            return _save(c, "ig")
+    except Exception as e:
+        log.warning(f"IG: {e}")
     return await dl_ytdlp(url, "instagram")
+
+
+# ════════════════════════════════════════════════════
+# yt-dlp — YouTube, Twitter, Pinterest, Facebook, Kwai
+# ════════════════════════════════════════════════════
 
 async def dl_ytdlp(url, plat=""):
     out = str(TMP / f"dl_{int(time.time())}_{os.getpid()}.%(ext)s")
     cmd = ["yt-dlp","--no-warnings","--no-playlist","--no-check-certificates",
-        "--socket-timeout","30","--retries","5","--extractor-retries","3",
-        "-f","best[ext=mp4]/best","--merge-output-format","mp4",
-        "-o",out,"--print","after_move:filepath","--user-agent",UA]
+           "--socket-timeout","30","--retries","5","--extractor-retries","3",
+           "-f","best[ext=mp4]/best","--merge-output-format","mp4",
+           "-o",out,"--print","after_move:filepath","--user-agent",UA]
     refs = {"tiktok":"https://www.tiktok.com/","instagram":"https://www.instagram.com/",
-            "twitter":"https://twitter.com/","pinterest":"https://www.pinterest.com/"}
-    if plat in refs: cmd += ["--add-header",f"Referer:{refs[plat]}"]
+            "twitter":"https://twitter.com/","pinterest":"https://www.pinterest.com/",
+            "shopee":"https://shopee.com.br/"}
+    if plat in refs: cmd += ["--add-header", f"Referer:{refs[plat]}"]
     cmd.append(url)
     try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(*cmd,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
         if proc.returncode == 0:
             fp = stdout.decode().strip().split("\n")[-1].strip()
@@ -206,227 +341,72 @@ async def dl_ytdlp(url, plat=""):
     except: pass
     return None
 
+
+# ════════════════════════════════════════════════════
+# ROTEADOR
+# ════════════════════════════════════════════════════
+
 async def download_video(url, plat):
     if plat == "shopee":
         fp = await dl_shopee(url)
-        if not fp:  # fallback: yt-dlp
-            fp = await dl_ytdlp(url, "shopee")
+        if not fp: fp = await dl_ytdlp(url, "shopee")
         return fp
     if plat == "tiktok": return await dl_tiktok(url)
     if plat == "instagram": return await dl_instagram(url)
     return await dl_ytdlp(url, plat)
 
+
+# ════════════════════════════════════════════════════
+# POST-PROCESSING (limpeza de metadados e compressão)
+# Sem delogo — o vídeo baixado JÁ não tem marca d'água.
+# ════════════════════════════════════════════════════
+
 def strip_meta(src):
-    dst = src.rsplit(".",1)[0] + "_c.mp4"
+    """Remove metadados sem re-encodar (preserva qualidade)."""
+    dst = src.rsplit(".",1)[0] + "_clean.mp4"
     try:
-        r = subprocess.run(["ffmpeg","-y","-i",src,"-map_metadata","-1","-fflags","+bitexact","-flags:v","+bitexact","-flags:a","+bitexact","-c","copy",dst], capture_output=True, timeout=120)
+        r = subprocess.run(["ffmpeg","-y","-i",src,
+            "-map_metadata","-1","-fflags","+bitexact",
+            "-flags:v","+bitexact","-flags:a","+bitexact",
+            "-c","copy","-movflags","+faststart",dst],
+            capture_output=True, timeout=120)
         if r.returncode == 0 and os.path.exists(dst): return dst
     except: pass
     return src
 
-def _detect_shopee_endcard(src: str, duration: float) -> float:
-    """Detecta quando o endcard vermelho da Shopee começa. Retorna duração real do conteúdo."""
-    # Endcard aparece nos últimos 2-5 segundos geralmente
-    check_points = []
-    for offset in [5, 4, 3, 2, 1]:
-        t = duration - offset
-        if t > 1:
-            check_points.append(t)
-
-    real_duration = duration
-    for t in check_points:
-        try:
-            # Extrair frame naquele ponto e analisar se é vermelho
-            tmp_frame = src.rsplit(".",1)[0] + f"_f{int(t)}.png"
-            r = subprocess.run([
-                "ffmpeg","-y","-ss",str(t),"-i",src,
-                "-vf","crop=100:100:iw/2-50:ih/2-50",
-                "-frames:v","1",tmp_frame
-            ], capture_output=True, timeout=10)
-
-            if r.returncode == 0 and os.path.exists(tmp_frame):
-                # Checar média de cor com ffmpeg signalstats
-                stats = subprocess.run([
-                    "ffmpeg","-i",tmp_frame,"-vf","signalstats",
-                    "-f","null","-"
-                ], capture_output=True, timeout=10)
-                stderr = stats.stderr.decode()
-                # Extrair médias RGB do output
-                import re
-                m_r = re.search(r'YAVG:([\d.]+)', stderr)
-                m_u = re.search(r'UAVG:([\d.]+)', stderr)
-                m_v = re.search(r'VAVG:([\d.]+)', stderr)
-
-                os.remove(tmp_frame)
-
-                if m_v:
-                    v_avg = float(m_v.group(1))
-                    # V (chroma red) alto = vermelho
-                    if v_avg > 170:  # threshold para vermelho Shopee
-                        real_duration = t
-                        log.info(f"Endcard vermelho detectado em t={t:.1f}s (V={v_avg:.0f})")
-                    else:
-                        break  # não é vermelho, conteúdo real
-        except Exception as e:
-            log.debug(f"Detect endcard t={t}: {e}")
-
-    return real_duration
-
-
-def _detect_red_endcard(src: str, total_duration: float) -> float:
-    """Detecta onde começa o card vermelho final da Shopee.
-    Retorna a duração do vídeo útil (sem o endcard)."""
-    try:
-        # Shopee sempre adiciona 3-5 segundos de endcard vermelho no final
-        # Amostra 3 frames no final (85%, 90%, 95%) para detectar cor predominante
-        check_points = [
-            max(0, total_duration - 5),
-            max(0, total_duration - 3),
-            max(0, total_duration - 1),
-        ]
-
-        red_start = None
-        for t in check_points:
-            r = subprocess.run([
-                "ffmpeg", "-y", "-ss", str(t), "-i", src,
-                "-vframes", "1", "-vf", "scale=50:50",
-                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
-            ], capture_output=True, timeout=15)
-
-            if r.returncode == 0 and r.stdout:
-                pixels = r.stdout
-                # Calcular cor média dos pixels
-                total_r, total_g, total_b = 0, 0, 0
-                count = len(pixels) // 3
-                for i in range(0, len(pixels), 3):
-                    total_r += pixels[i]
-                    total_g += pixels[i+1]
-                    total_b += pixels[i+2]
-                avg_r = total_r // count
-                avg_g = total_g // count
-                avg_b = total_b // count
-
-                # Shopee red: R alto (200+), G/B baixos (<120)
-                is_shopee_red = avg_r > 180 and avg_g < 130 and avg_b < 120
-
-                if is_shopee_red:
-                    if red_start is None or t < red_start:
-                        red_start = t
-                    log.info(f"Endcard vermelho detectado em t={t:.1f}s (RGB {avg_r},{avg_g},{avg_b})")
-
-        if red_start is not None:
-            # Cortar 0.5s antes pra garantir
-            return max(1.0, red_start - 0.5)
-    except Exception as e:
-        log.warning(f"Detect endcard erro: {e}")
-
-    return total_duration
-
-
-def remove_watermark(src: str, platform: str) -> str:
-    """Remove marca d'água Shopee + corta endcard vermelho final.
-    Coordenadas testadas e validadas com vídeos reais."""
-    if platform != "shopee":
-        return src
-
-    dst = src.rsplit(".",1)[0] + "_nowm.mp4"
-    try:
-        # 1. Dimensões + duração
-        probe = subprocess.run([
-            "ffprobe","-v","quiet","-select_streams","v:0",
-            "-show_entries","stream=width,height:format=duration",
-            "-of","json",src
-        ], capture_output=True, timeout=15)
-        info = json.loads(probe.stdout.decode())
-        stream = info.get("streams",[{}])[0]
-        w = int(stream.get("width", 0))
-        h = int(stream.get("height", 0))
-        duration = float(info.get("format",{}).get("duration", 0))
-
-        if w < 100 or h < 100 or duration < 2:
-            return src
-
-        # 2. Detectar endcard vermelho
-        useful_duration = _detect_red_endcard(src, duration)
-
-        # 3. Coordenadas validadas (testadas com vídeo real 480x854)
-        # Logo ShopeeVideo: ocupa ~35% largura, altura 6% — posição y=43%
-        # Username @xxx: ocupa ~27% largura, altura 5% — posição y=50%
-        # IMPORTANTE: delogo exige x >= 1 e y >= 1 (NÃO aceita 0)
-
-        # Região 1: Logo "ShopeeVideo" (linha superior)
-        r1_x = max(1, int(w * 0.01))
-        r1_y = int(h * 0.43)
-        r1_w = int(w * 0.36)
-        r1_h = int(h * 0.065)
-
-        # Região 2: Username (@xxxxxx) (linha inferior)
-        r2_x = max(1, int(w * 0.01))
-        r2_y = int(h * 0.505)
-        r2_w = int(w * 0.28)
-        r2_h = int(h * 0.055)
-
-        # Garantir que estão dentro do frame
-        for (x, y, rw, rh) in [(r1_x, r1_y, r1_w, r1_h), (r2_x, r2_y, r2_w, r2_h)]:
-            if x + rw >= w or y + rh >= h or rw < 10 or rh < 10:
-                log.warning(f"Coordenadas inválidas, pulando delogo")
-                return src
-
-        log.info(f"Shopee: {w}x{h} {duration:.1f}s → watermark removal; útil={useful_duration:.1f}s")
-
-        # 4. Filtro combinado: 2 delogos em cascata
-        vf = (
-            f"delogo=x={r1_x}:y={r1_y}:w={r1_w}:h={r1_h},"
-            f"delogo=x={r2_x}:y={r2_y}:w={r2_w}:h={r2_h}"
-        )
-
-        # 5. Comando ffmpeg — corta o endcard se detectado
-        cmd = ["ffmpeg","-y","-i",src]
-        if useful_duration < duration - 0.5:
-            cmd += ["-t", f"{useful_duration:.2f}"]
-        cmd += [
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k",
-            "-map_metadata", "-1",
-            "-movflags", "+faststart",
-            dst
-        ]
-
-        r = subprocess.run(cmd, capture_output=True, timeout=300)
-
-        if r.returncode == 0 and os.path.exists(dst):
-            new_sz = os.path.getsize(dst)
-            if new_sz > 50000:
-                log.info(f"✅ Watermark removida + endcard cortado: {os.path.getsize(src)//1024}KB → {new_sz//1024}KB")
-                return dst
-
-        err = r.stderr.decode()[:300]
-        log.warning(f"❌ delogo falhou: {err}")
-    except Exception as e:
-        log.warning(f"Watermark removal erro: {e}")
-
-    return src
-
 
 def compress(src, target=45):
-    sz = os.path.getsize(src)/(1024*1024)
+    """Comprime vídeo mantendo qualidade se passar do limite do Telegram."""
+    sz = os.path.getsize(src) / (1024*1024)
     if sz <= target: return src
     dst = src.rsplit(".",1)[0] + "_comp.mp4"
     try:
-        p = subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration","-of","csv=p=0",src], capture_output=True, timeout=30)
+        p = subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration",
+                           "-of","csv=p=0",src], capture_output=True, timeout=30)
         dur = float(p.stdout.decode().strip() or "60")
-        vbr = max(int((target*8*1024*1024/dur)*0.85), 500000)
-        subprocess.run(["ffmpeg","-y","-i",src,"-c:v","libx264","-b:v",str(vbr),"-preset","fast","-crf","28","-c:a","aac","-b:a","128k","-movflags","+faststart","-map_metadata","-1",dst], capture_output=True, timeout=300)
+        vbr = max(int((target*8*1024*1024/dur)*0.88), 700000)
+        subprocess.run(["ffmpeg","-y","-i",src,
+            "-c:v","libx264","-b:v",str(vbr),
+            "-preset","medium","-crf","23",
+            "-c:a","aac","-b:a","128k",
+            "-movflags","+faststart","-map_metadata","-1",dst],
+            capture_output=True, timeout=600)
         if os.path.exists(dst): return dst
     except: pass
     return src
 
-def cleanup(*p):
-    for f in p:
+
+def cleanup(*paths):
+    for p in paths:
         try:
-            if f and os.path.exists(f): os.remove(f)
+            if p and os.path.exists(p): os.remove(p)
         except: pass
+
+
+def esc(t):
+    """Escape para Markdown V2."""
+    return re.sub(r'([_*\[\]()~`>#+=|{}.!\\-])', r'\\\1', str(t))
+
 
 # ════════════════════════════════════════════════════
 # HANDLERS
@@ -435,15 +415,18 @@ def cleanup(*p):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s = load_s()
     await update.message.reply_text(
-        f"🚀 *Viral Engine*\n\n"
-        f"Cole o link do vídeo\\.\n"
-        f"Eu baixo sem marca d'água e gero legenda \\+ hashtags\\.\n\n"
-        f"🛒 Shopee · 🎵 TikTok · ▶️ YouTube · 🐦 X\n"
-        f"📌 Pinterest · 📘 Facebook · 🎬 Kwai · 📸 Instagram\n\n"
-        f"_{s.get('d',0)} downloads_\n\n"
-        f"👇 Manda o link",
+        "🚀 *Viral Engine*\n\n"
+        "Cole o link do vídeo\\.\n"
+        "Eu baixo sem marca d'água em qualidade original\\.\n"
+        "E gero legenda \\+ hashtags virais\\.\n\n"
+        "🛒 Shopee · 🎵 TikTok · ▶️ YouTube\n"
+        "🐦 X · 📌 Pinterest · 📘 Facebook\n"
+        "🎬 Kwai · 📸 Instagram\n\n"
+        f"_{esc(str(s.get('d',0)))} downloads realizados_\n\n"
+        "👇 Manda o link",
         parse_mode=ParseMode.MARKDOWN_V2
     )
+
 
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -461,103 +444,152 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fp = await download_video(link, plat)
 
         if fp:
-            # REMOVER MARCA D'ÁGUA (Shopee)
-            if plat == "shopee":
-                try: await status.edit_text("🧹 Removendo marca d'água...")
-                except: pass
-            nowm = remove_watermark(fp, plat)
-            src = nowm if nowm != fp else fp
+            # Apenas limpeza de metadados (sem delogo, sem blur)
+            cleaned = strip_meta(fp)
+            final = cleaned if cleaned != fp else fp
 
-            cleaned = strip_meta(src)
-            final = cleaned if cleaned != src else src
-            sz = os.path.getsize(final)/(1024*1024)
+            sz = os.path.getsize(final) / (1024*1024)
             if sz > 49:
-                try: await status.edit_text(f"🗜 Comprimindo ({sz:.0f}MB)...")
+                try: await status.edit_text(f"🗜 Otimizando ({sz:.0f}MB)...")
                 except: pass
                 final = compress(final)
-            sz = os.path.getsize(final)/(1024*1024)
+
+            sz = os.path.getsize(final) / (1024*1024)
             if sz <= 49:
                 try: await status.delete()
                 except: pass
                 try:
-                    with open(final,"rb") as f:
-                        await update.message.reply_video(video=f, caption="✅ Sem marca d'água · HD", read_timeout=300, write_timeout=300)
+                    with open(final, "rb") as f:
+                        await update.message.reply_video(
+                            video=f,
+                            caption="✅ Sem marca d'água · qualidade original",
+                            read_timeout=300, write_timeout=300,
+                            supports_streaming=True,
+                        )
                     track(uid)
-                except:
+                except Exception as e:
+                    log.error(f"Erro envio: {e}")
                     try: await status.edit_text("⚠️ Erro ao enviar. Tente novamente.")
                     except: pass
             else:
                 try: await status.edit_text(f"⚠️ Vídeo muito grande ({sz:.0f}MB).")
                 except: pass
+
             cleanup(fp)
-            if nowm and nowm != fp: cleanup(nowm)
-            if cleaned and cleaned != fp and cleaned != nowm: cleanup(cleaned)
-            if final != fp and final != nowm and final != cleaned: cleanup(final)
+            if cleaned and cleaned != fp: cleanup(cleaned)
+            if final != fp and final != cleaned: cleanup(final)
         else:
             try: await status.edit_text("⚠️ Não consegui baixar. Verifique se o vídeo é público.")
             except: pass
 
-        # Legenda + hashtags por plataforma
+        # Gerar legenda + hashtags
         data = generate(link)
-        ctx.user_data.update({"shopee":data["shopee"],"tiktok":data["tiktok"],"insta":data["insta"],"src":link})
+        ctx.user_data["shopee"] = data.get("shopee", data.get("full", ""))
+        ctx.user_data["tiktok"] = data.get("tiktok", data.get("full", ""))
+        ctx.user_data["insta"] = data.get("insta", data.get("full", ""))
+        ctx.user_data["src"] = link
 
-        await update.message.reply_text(data["full"],
+        await update.message.reply_text(
+            data["full"],
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🛒 Copiar p/ Shopee", callback_data="cp_shopee")],
                 [InlineKeyboardButton("🎵 Copiar p/ TikTok", callback_data="cp_tiktok")],
                 [InlineKeyboardButton("📸 Copiar p/ Instagram", callback_data="cp_insta")],
                 [InlineKeyboardButton("🔄 Nova legenda", callback_data="regen")],
-            ]))
+            ])
+        )
+
     else:
+        # Texto livre / nome de produto
         await update.message.reply_chat_action(ChatAction.TYPING)
         data = generate(link or text)
-        ctx.user_data.update({"shopee":data["shopee"],"tiktok":data["tiktok"],"insta":data["insta"],"src":link or text})
+        ctx.user_data["shopee"] = data.get("shopee", data.get("full", ""))
+        ctx.user_data["tiktok"] = data.get("tiktok", data.get("full", ""))
+        ctx.user_data["insta"] = data.get("insta", data.get("full", ""))
+        ctx.user_data["src"] = link or text
 
-        await update.message.reply_text(data["full"],
+        await update.message.reply_text(
+            data["full"],
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🛒 Copiar p/ Shopee", callback_data="cp_shopee")],
                 [InlineKeyboardButton("🎵 Copiar p/ TikTok", callback_data="cp_tiktok")],
                 [InlineKeyboardButton("📸 Copiar p/ Instagram", callback_data="cp_insta")],
                 [InlineKeyboardButton("🔄 Nova legenda", callback_data="regen")],
-            ]))
+            ])
+        )
         track(uid)
 
+
 async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    if q.data == "cp_shopee":
-        t = ctx.user_data.get("shopee","")
-        if t: await q.message.reply_text(t)
-    elif q.data == "cp_tiktok":
-        t = ctx.user_data.get("tiktok","")
-        if t: await q.message.reply_text(t)
-    elif q.data == "cp_insta":
-        t = ctx.user_data.get("insta","")
-        if t: await q.message.reply_text(t)
-    elif q.data == "regen":
-        src = ctx.user_data.get("src","")
+    q = update.callback_query
+    try:
+        await q.answer()
+    except: pass
+
+    action = q.data
+
+    if action == "cp_shopee":
+        t = ctx.user_data.get("shopee", "")
+        if t:
+            await q.message.reply_text(t)
+        else:
+            await q.message.reply_text("⚠️ Sem legenda armazenada. Envie o link novamente.")
+
+    elif action == "cp_tiktok":
+        t = ctx.user_data.get("tiktok", "")
+        if t:
+            await q.message.reply_text(t)
+        else:
+            await q.message.reply_text("⚠️ Sem legenda armazenada. Envie o link novamente.")
+
+    elif action == "cp_insta":
+        t = ctx.user_data.get("insta", "")
+        if t:
+            await q.message.reply_text(t)
+        else:
+            await q.message.reply_text("⚠️ Sem legenda armazenada. Envie o link novamente.")
+
+    elif action == "regen":
+        src = ctx.user_data.get("src", "")
         if src:
             data = generate(src)
-            ctx.user_data.update({"shopee":data["shopee"],"tiktok":data["tiktok"],"insta":data["insta"]})
-            await q.message.reply_text(data["full"],
+            ctx.user_data["shopee"] = data.get("shopee", data.get("full", ""))
+            ctx.user_data["tiktok"] = data.get("tiktok", data.get("full", ""))
+            ctx.user_data["insta"] = data.get("insta", data.get("full", ""))
+
+            await q.message.reply_text(
+                data["full"],
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🛒 Copiar p/ Shopee", callback_data="cp_shopee")],
                     [InlineKeyboardButton("🎵 Copiar p/ TikTok", callback_data="cp_tiktok")],
                     [InlineKeyboardButton("📸 Copiar p/ Instagram", callback_data="cp_insta")],
                     [InlineKeyboardButton("🔄 Nova legenda", callback_data="regen")],
-                ]))
+                ])
+            )
+        else:
+            await q.message.reply_text("⚠️ Envie um link ou nome de produto primeiro.")
+
 
 async def post_init(app):
-    await app.bot.set_my_commands([BotCommand("start","Iniciar")])
+    await app.bot.set_my_commands([BotCommand("start", "Iniciar")])
+
 
 def main():
-    if not TOKEN: print("❌ Configure TELEGRAM_BOT_TOKEN"); return
+    if not TOKEN:
+        print("❌ Configure TELEGRAM_BOT_TOKEN")
+        return
+
     update_ytdlp()
     threading.Thread(target=start_http, daemon=True).start()
+
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.add_handler(CallbackQueryHandler(handle_cb))
+
     log.info("🚀 Bot rodando!")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()
