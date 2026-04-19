@@ -1,8 +1,8 @@
 """
-Viral Engine Bot — Versão Final com Playwright
-- Shopee: extração REAL sem marca d'água via Chromium headless
-- TikTok, Instagram, YouTube, Kwai, etc: APIs oficiais ou yt-dlp
-- Legenda + hashtags baseadas no TÍTULO REAL do produto
+Viral Engine Bot — Versão Honesta
+- Shopee: 3 estratégias + cookies autenticados + aviso de marca d'água
+- Callbacks funcionando (use_context + persistência de state)
+- Hashtags focadas no produto
 """
 
 import os
@@ -20,17 +20,20 @@ from collections import deque
 import requests as req
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters, PicklePersistence
+)
 from telegram.constants import ParseMode, ChatAction
 
 from engine import generate, detect_platform, can_download
-from shopee_extractor import download_shopee_video
+from shopee_extractor import download_shopee
 
 # ══════════════════════════════════════════════════════════════
-# Logging com buffer para /debug
+# Logging com buffer
 # ══════════════════════════════════════════════════════════════
 
-DEBUG_LOGS = deque(maxlen=100)
+DEBUG_LOGS = deque(maxlen=120)
 
 class BufferHandler(logging.Handler):
     def emit(self, record):
@@ -39,7 +42,6 @@ class BufferHandler(logging.Handler):
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S")
 _buf = BufferHandler(); _buf.setFormatter(_fmt); _buf.setLevel(logging.INFO)
-
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
@@ -51,15 +53,49 @@ log = logging.getLogger("bot")
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "10000"))
+COOKIES_PATH = os.environ.get("SHOPEE_COOKIES_PATH", "/app/shopee_cookies.txt")
+
 TMP = Path(tempfile.gettempdir()) / "vbot"
 TMP.mkdir(exist_ok=True)
 STATS = TMP / "stats.json"
+STATE = TMP / "user_state.json"  # persistência dos callbacks
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 
 # ══════════════════════════════════════════════════════════════
-# Health server (Railway/Render)
+# Persistência de estado dos callbacks (arquivo)
+# ══════════════════════════════════════════════════════════════
+
+_state_lock = threading.Lock()
+
+def load_state() -> dict:
+    try:
+        if STATE.exists():
+            return json.loads(STATE.read_text())
+    except: pass
+    return {}
+
+def save_state(state: dict):
+    try:
+        with _state_lock:
+            STATE.write_text(json.dumps(state))
+    except Exception as e:
+        log.error(f"save_state erro: {e}")
+
+def set_user_data(uid: int, data: dict):
+    """Salva dados do usuário em arquivo (sobrevive a restart)."""
+    state = load_state()
+    state[str(uid)] = data
+    save_state(state)
+
+def get_user_data(uid: int) -> dict:
+    state = load_state()
+    return state.get(str(uid), {})
+
+
+# ══════════════════════════════════════════════════════════════
+# Health server
 # ══════════════════════════════════════════════════════════════
 
 class Health(BaseHTTPRequestHandler):
@@ -93,23 +129,19 @@ def update_ytdlp():
     try:
         subprocess.run(["pip", "install", "--upgrade", "--break-system-packages", "yt-dlp"],
                        capture_output=True, timeout=120)
-        v = subprocess.run(["yt-dlp", "--version"], capture_output=True, timeout=10)
-        log.info(f"yt-dlp: {v.stdout.decode().strip()}")
-    except Exception as e:
-        log.warning(f"yt-dlp update: {e}")
+    except: pass
 
 
 # ══════════════════════════════════════════════════════════════
-# Downloads por plataforma
+# Download de plataformas que não são Shopee
 # ══════════════════════════════════════════════════════════════
 
-def _save(data, prefix="vid"):
+def _save_bytes(data, prefix="vid"):
     fp = str(TMP / f"{prefix}_{int(time.time())}_{os.getpid()}.mp4")
     with open(fp, "wb") as f: f.write(data)
     return fp
 
-
-def _dl(url, headers=None, min_size=30000):
+def _dl_url(url, headers=None, min_size=30000):
     try:
         h = {"User-Agent": UA}
         if headers: h.update(headers)
@@ -121,16 +153,7 @@ def _dl(url, headers=None, min_size=30000):
     return None
 
 
-async def dl_shopee(url):
-    """Shopee: usa Playwright para extrair vídeo SEM marca d'água."""
-    result = await download_shopee_video(url)
-    if not result:
-        return None, None
-    return result["filepath"], result.get("metadata")
-
-
 async def dl_tiktok(url):
-    log.info(f"TikTok: {url}")
     for ep in ["https://www.tikwm.com/api/", "https://tikwm.com/api/"]:
         try:
             r = req.post(ep, data={"url": url, "hd": 1}, headers={"User-Agent": UA}, timeout=30)
@@ -139,8 +162,9 @@ async def dl_tiktok(url):
                 u = d["data"].get("hdplay") or d["data"].get("play")
                 title = d["data"].get("title", "")
                 if u:
-                    c = _dl(u, {"User-Agent": "okhttp"})
-                    if c: return _save(c, "tt"), {"title": title, "caption": title}
+                    c = _dl_url(u, {"User-Agent": "okhttp"})
+                    if c:
+                        return _save_bytes(c, "tt"), {"title": title, "caption": title}
         except Exception as e:
             log.warning(f"TikWM: {e}")
     fp = await dl_ytdlp(url, "tiktok")
@@ -148,9 +172,8 @@ async def dl_tiktok(url):
 
 
 async def dl_instagram(url):
-    log.info(f"IG: {url}")
     try:
-        m = re.search(r'/(p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
+        m = re.search(r"/(p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
         if m:
             sc = m.group(2)
             for embed in [f"https://www.instagram.com/p/{sc}/embed/",
@@ -164,8 +187,8 @@ async def dl_instagram(url):
                         if vm:
                             u = (vm.group(1).replace("\\u0026", "&")
                                  .replace("\\/", "/").replace("&amp;", "&"))
-                            c = _dl(u, {"Referer": "https://www.instagram.com/"})
-                            if c: return _save(c, "ig"), None
+                            c = _dl_url(u, {"Referer": "https://www.instagram.com/"})
+                            if c: return _save_bytes(c, "ig"), None
                 except Exception as e:
                     log.warning(f"IG embed: {e}")
     except Exception as e:
@@ -175,10 +198,9 @@ async def dl_instagram(url):
 
 
 async def dl_ytdlp(url, plat=""):
-    log.info(f"yt-dlp: {url[:80]} ({plat})")
     out = str(TMP / f"dl_{int(time.time())}_{os.getpid()}.%(ext)s")
     cmd = ["yt-dlp", "--no-warnings", "--no-playlist", "--no-check-certificates",
-           "--socket-timeout", "30", "--retries", "5",
+           "--socket-timeout", "30", "--retries", "3",
            "-f", "best[ext=mp4]/best", "--merge-output-format", "mp4",
            "-o", out, "--print", "after_move:filepath", "--user-agent", UA]
     refs = {
@@ -193,31 +215,49 @@ async def dl_ytdlp(url, plat=""):
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
         if proc.returncode == 0:
             fp = stdout.decode().strip().split("\n")[-1].strip()
             if fp and os.path.exists(fp):
-                log.info(f"yt-dlp OK: {os.path.getsize(fp)//1024}KB")
                 return fp
-        log.warning(f"yt-dlp rc={proc.returncode}: {stderr.decode()[:200]}")
     except Exception as e:
-        log.warning(f"yt-dlp erro: {e}")
+        log.warning(f"yt-dlp: {e}")
     return None
 
 
+# ══════════════════════════════════════════════════════════════
+# Roteador
+# ══════════════════════════════════════════════════════════════
+
 async def download_video(url, plat):
+    """
+    Retorna: (filepath, metadata, extra_info)
+    extra_info: dict com "watermark_detected", "endcard_trimmed", "strategy_used", "debug"
+    """
     if plat == "shopee":
-        return await dl_shopee(url)
+        result = await download_shopee(url, cookies_path=COOKIES_PATH)
+        return (
+            result.get("filepath"),
+            result.get("metadata", {}),
+            {
+                "watermark_detected": result.get("watermark_detected", False),
+                "endcard_trimmed": result.get("endcard_trimmed", False),
+                "strategy_used": result.get("strategy_used"),
+                "debug": result.get("debug", []),
+            }
+        )
     if plat == "tiktok":
-        return await dl_tiktok(url)
+        fp, md = await dl_tiktok(url)
+        return fp, md, {}
     if plat == "instagram":
-        return await dl_instagram(url)
+        fp, md = await dl_instagram(url)
+        return fp, md, {}
     fp = await dl_ytdlp(url, plat)
-    return fp, None
+    return fp, None, {}
 
 
 # ══════════════════════════════════════════════════════════════
-# Post-processing
+# Pós-processamento
 # ══════════════════════════════════════════════════════════════
 
 def strip_meta(src):
@@ -259,7 +299,7 @@ def cleanup(*paths):
 
 
 def esc(t):
-    return re.sub(r'([_*\[\]()~`>#+=|{}.!\\-])', r'\\\1', str(t))
+    return re.sub(r"([_*\[\]()~`>#+=|{}.!\\-])", r"\\\1", str(t))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -277,17 +317,18 @@ def _kb():
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s = load_s()
+    has_cookies = os.path.exists(COOKIES_PATH)
+    cookies_status = "✅ Autenticado" if has_cookies else "⚠️ Modo anônimo"
+
     await update.message.reply_text(
         "🚀 *Viral Engine*\n\n"
         "Cole o link do vídeo\\.\n"
-        "Eu baixo sem marca d'água e gero legenda \\+ hashtags do produto\\.\n\n"
-        "🛒 Shopee \\(com Playwright\\) · 🎵 TikTok\n"
-        "📸 Instagram · ▶️ YouTube · 🎬 Kwai\n"
-        "🐦 X · 📌 Pinterest · 📘 Facebook\n\n"
-        f"_{esc(str(s.get('d', 0)))} downloads realizados_\n\n"
-        "Comandos:\n"
-        "/start \\- início\n"
-        "/debug \\- logs técnicos",
+        "Eu baixo e gero legenda \\+ hashtags\\.\n\n"
+        f"Shopee: {esc(cookies_status)}\n\n"
+        "🛒 Shopee · 🎵 TikTok · 📸 Instagram\n"
+        "▶️ YouTube · 🎬 Kwai · 🐦 X\n\n"
+        f"_{esc(str(s.get('d', 0)))} downloads_\n\n"
+        "/start · /debug",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -307,18 +348,19 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or len(text) < 3: return
 
     uid = update.effective_user.id
-    link_m = re.search(r'https?://\S+', text)
+    link_m = re.search(r"https?://\S+", text)
     link = link_m.group(0) if link_m else None
     plat = detect_platform(link) if link else None
 
-    log.info(f"━━━ MSG user={uid}: link={link} plat={plat}")
+    log.info(f"━━━━━ MSG user={uid} plat={plat}")
 
     metadata = None
+    extra_info = {}
 
     if link and can_download(plat):
         if plat == "shopee":
             status = await update.message.reply_text(
-                "⏳ Extraindo vídeo da Shopee (isso leva 15-40s)..."
+                "⏳ Processando Shopee (pode demorar 30-60s)..."
             )
         else:
             status = await update.message.reply_text(f"⏳ Baixando do {plat.upper()}...")
@@ -327,7 +369,7 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         fp = None
         try:
-            fp, metadata = await download_video(link, plat)
+            fp, metadata, extra_info = await download_video(link, plat)
         except Exception as e:
             log.error(f"download_video: {e}")
 
@@ -345,15 +387,41 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if sz <= 49:
                 try: await status.delete()
                 except: pass
-                try:
-                    caption_video = "✅ Sem marca d'água · qualidade original"
-                    if metadata and metadata.get("username"):
-                        caption_video += f"\n📎 Criador: @{metadata['username']}"
 
+                # Construir caption HONESTA com status
+                caption_parts = []
+
+                if extra_info.get("watermark_detected"):
+                    caption_parts.append(
+                        "⚠️ *Marca d'água presente*\n"
+                        "Tecnicamente impossível remover sem recursos adicionais\\."
+                    )
+                else:
+                    caption_parts.append("✅ *Sem marca d'água detectada*")
+
+                if extra_info.get("endcard_trimmed"):
+                    caption_parts.append("✂️ Endcard vermelho cortado")
+
+                strategy = extra_info.get("strategy_used")
+                if strategy:
+                    strategy_label = {
+                        "mobile_api": "API autenticada",
+                        "playwright_auth": "Playwright autenticado",
+                        "playwright": "Playwright público",
+                    }.get(strategy, strategy)
+                    caption_parts.append(f"_Método: {esc(strategy_label)}_")
+
+                if metadata and metadata.get("username"):
+                    caption_parts.append(f"📎 @{esc(metadata['username'])}")
+
+                caption_text = "\n".join(caption_parts)
+
+                try:
                     with open(final, "rb") as f:
                         await update.message.reply_video(
                             video=f,
-                            caption=caption_video,
+                            caption=caption_text,
+                            parse_mode=ParseMode.MARKDOWN_V2,
                             read_timeout=300,
                             write_timeout=300,
                             supports_streaming=True,
@@ -373,31 +441,32 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             try:
                 await status.edit_text(
-                    "⚠️ Não consegui baixar. Envie /debug para detalhes técnicos."
+                    "⚠️ Não consegui baixar\\.\n"
+                    "Envie /debug para detalhes técnicos\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
             except: pass
 
-        # Gerar legenda (usa metadata se disponível)
+        # Gerar legenda (mesmo se download falhou) e SALVAR em arquivo
         try:
             data = generate(link, metadata=metadata)
-            ctx.user_data["v1"] = data["v1"]
-            ctx.user_data["v2"] = data["v2"]
-            ctx.user_data["v3"] = data["v3"]
-            ctx.user_data["src"] = link
-            ctx.user_data["metadata"] = metadata
+            set_user_data(uid, {
+                "v1": data["v1"],
+                "v2": data["v2"],
+                "v3": data["v3"],
+                "src": link,
+                "metadata": metadata,
+            })
 
             header = ""
             if metadata and metadata.get("product_name"):
-                header = f"📦 *Produto detectado:* {esc(metadata['product_name'][:80])}\n\n"
-
-            cat = data.get("category", "geral")
-            log.info(f"Legenda gerada: cat={cat}, prod={data.get('product_name','?')[:50]}")
+                header = f"📦 *Produto:* {esc(metadata['product_name'][:80])}\n\n"
 
             full_msg = (header + data["full"]) if header else data["full"]
+
             if header:
                 await update.message.reply_text(
-                    full_msg,
-                    reply_markup=_kb(),
+                    full_msg, reply_markup=_kb(),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
             else:
@@ -407,16 +476,17 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             log.error(f"Legenda erro: {e}")
 
     else:
-        # Texto livre (sem link de plataforma suportada)
+        # Texto livre
         await update.message.reply_chat_action(ChatAction.TYPING)
         try:
             data = generate(link or text)
-            ctx.user_data["v1"] = data["v1"]
-            ctx.user_data["v2"] = data["v2"]
-            ctx.user_data["v3"] = data["v3"]
-            ctx.user_data["src"] = link or text
-            ctx.user_data["metadata"] = None
-
+            set_user_data(uid, {
+                "v1": data["v1"],
+                "v2": data["v2"],
+                "v3": data["v3"],
+                "src": link or text,
+                "metadata": None,
+            })
             await update.message.reply_text(data["full"], reply_markup=_kb())
             track(uid)
         except Exception as e:
@@ -425,30 +495,41 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callbacks dos botões — agora carregam do arquivo, não do ctx.user_data."""
     q = update.callback_query
     try: await q.answer()
     except: pass
 
+    uid = q.from_user.id
     action = q.data
-    log.info(f"callback: {action}")
+    log.info(f"CB user={uid} action={action}")
+
+    user_data = get_user_data(uid)
 
     if action in ("cp_v1", "cp_v2", "cp_v3"):
         key = action.replace("cp_", "")
-        text = ctx.user_data.get(key, "")
+        text = user_data.get(key, "")
         if text:
             await q.message.reply_text(text)
         else:
-            await q.message.reply_text("⚠️ Envie o link novamente.")
+            await q.message.reply_text(
+                "⚠️ Sem legenda armazenada.\n"
+                "Envie o link novamente."
+            )
 
     elif action == "regen":
-        src = ctx.user_data.get("src", "")
-        md = ctx.user_data.get("metadata")
+        src = user_data.get("src", "")
+        md = user_data.get("metadata")
         if src:
             try:
                 data = generate(src, metadata=md)
-                ctx.user_data["v1"] = data["v1"]
-                ctx.user_data["v2"] = data["v2"]
-                ctx.user_data["v3"] = data["v3"]
+                set_user_data(uid, {
+                    "v1": data["v1"],
+                    "v2": data["v2"],
+                    "v3": data["v3"],
+                    "src": src,
+                    "metadata": md,
+                })
                 await q.message.reply_text(data["full"], reply_markup=_kb())
             except Exception as e:
                 log.error(f"Regen: {e}")
@@ -460,7 +541,7 @@ async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start", "Iniciar"),
-        BotCommand("debug", "Ver logs (suporte)"),
+        BotCommand("debug", "Ver logs"),
     ])
 
 
@@ -478,7 +559,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.add_handler(CallbackQueryHandler(handle_cb))
 
-    log.info("🚀 Viral Engine Bot rodando!")
+    log.info("🚀 Viral Engine Bot (versão honesta) rodando!")
+    log.info(f"Cookies: {'✅ encontrados' if os.path.exists(COOKIES_PATH) else '⚠️ não encontrados em ' + COOKIES_PATH}")
     app.run_polling(drop_pending_updates=True)
 
 
