@@ -1,16 +1,18 @@
 services:
   - type: web
-    name: viral-engine-bot
+    name: viral-engine-honest
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: standard  # standard (2GB) recomendado. starter ($7, 512MB) pode crashar.
-    region: oregon  # oregon/frankfurt/ohio/singapore - escolha o mais próximo
+    plan: standard  # 2GB RAM recomendado; 'starter' (512MB) arriscado
+    region: oregon  # oregon, frankfurt, ohio, singapore
     healthCheckPath: /
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false  # você define manualmente no dashboard
+        sync: false  # definir manualmente no painel do Render
       - key: PORT
         value: 10000
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: SHOPEE_COOKIES_PATH
+        value: /app/shopee_cookies.txt
     autoDeploy: true
