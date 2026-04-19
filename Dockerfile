@@ -1,6 +1,9 @@
 # Imagem oficial do Playwright Python — versão travada igual ao requirements.txt
 FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
+# Cache buster — altere esse valor para forçar rebuild completo
+ARG CACHE_BUST=2026-04-19-v2
+
 # Instalar ffmpeg para post-processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
