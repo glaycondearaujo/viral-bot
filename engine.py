@@ -1,7 +1,6 @@
 """
-engine.py — Motor viral inteligente.
-Usa o TÍTULO REAL do vídeo + nome do produto para gerar hashtags precisas.
-Zero hashtags de plataforma.
+engine.py — Legendas e hashtags focadas no PRODUTO.
+Sem hashtags de plataforma (#shopee, #tiktok, etc).
 """
 
 import random
@@ -10,7 +9,7 @@ from urllib.parse import urlparse, unquote
 
 
 # ══════════════════════════════════════════════════════════════
-# HASHTAGS POR CATEGORIA — 100% focadas no produto
+# HASHTAGS POR CATEGORIA — focadas no produto
 # ══════════════════════════════════════════════════════════════
 
 TAGS_CAT = {
@@ -26,55 +25,51 @@ TAGS_CAT = {
     ],
     "eletronicos": [
         "#tecnologia", "#gadgets", "#tech", "#eletronicos", "#acessorios",
-        "#inovacao", "#setup", "#workspace", "#produtividade",
-        "#conectividade", "#wireless", "#qualidadepremium",
+        "#inovacao", "#setup", "#produtividade", "#wireless",
     ],
     "lingerie": [
         "#lingerie", "#modaintima", "#autoestima", "#empoderamento",
         "#sensualidade", "#feminina", "#delicada", "#renda", "#tule",
-        "#conjunto", "#intimo", "#charme", "#confianca",
+        "#conjunto", "#charme", "#confianca",
     ],
     "moda_feminina": [
         "#modafeminina", "#roupafeminina", "#estilofeminino", "#look",
-        "#outfit", "#tendencia", "#elegante", "#delicado", "#feminina",
+        "#outfit", "#tendencia", "#elegante", "#feminina",
         "#lookdodia", "#inspiracao",
     ],
     "moda": [
         "#moda", "#estilo", "#look", "#outfit", "#lookdodia",
-        "#tendencia", "#style", "#streetwear", "#inspiracao",
+        "#tendencia", "#streetwear", "#inspiracao",
     ],
     "perfume": [
         "#perfume", "#perfumaria", "#fragrance", "#fragrancia",
-        "#cheirogostoso", "#aroma", "#autoestima", "#body", "#colonia",
+        "#cheirogostoso", "#aroma", "#autoestima", "#colonia",
     ],
     "maquiagem": [
         "#maquiagem", "#makeup", "#batom", "#base", "#sombra",
         "#delineador", "#rimel", "#blush", "#beautyhacks",
-        "#maquiagembrasileira", "#mua",
+        "#maquiagembrasileira",
     ],
     "skincare": [
         "#skincare", "#beleza", "#rotinadebeleza", "#cuidados",
-        "#peleperfeita", "#glowup", "#autoestima", "#belezanatural",
-        "#acido", "#hidratacao", "#protetorsolar",
+        "#peleperfeita", "#glowup", "#belezanatural", "#hidratacao",
     ],
     "cabelo": [
         "#cabelo", "#hair", "#hairstyle", "#cabeloperfeito",
         "#cachos", "#hidratacao", "#crescimentocapilar",
-        "#cuidadoscomocabelo",
     ],
     "casa": [
         "#casa", "#decoracao", "#organizacao", "#home", "#homedecor",
-        "#casaorganizada", "#decor", "#interiordesign", "#utilidades",
-        "#praticidade", "#diy", "#transformacao",
+        "#casaorganizada", "#decor", "#utilidades", "#diy",
+        "#transformacao",
     ],
     "cozinha": [
         "#cozinha", "#utensilioscozinha", "#kitchen", "#cozinhapratica",
-        "#receitas", "#chef", "#cozinhafuncional", "#organizacao",
+        "#receitas", "#cozinhafuncional", "#organizacao",
     ],
     "esporte": [
         "#fitness", "#treino", "#academia", "#saude", "#vidasaudavel",
         "#gym", "#workout", "#motivacao", "#esporte", "#bemestar",
-        "#foco", "#disciplina",
     ],
     "bebe": [
         "#bebe", "#maternidade", "#mae", "#mamae", "#enxoval",
@@ -86,12 +81,12 @@ TAGS_CAT = {
     ],
     "bolsa_mochila": [
         "#bolsa", "#mochila", "#bolsafeminina", "#acessorios",
-        "#estilo", "#pratica", "#espacosa", "#organizada",
+        "#estilo", "#pratica", "#espacosa",
     ],
     "bolsa_termica": [
-        "#bolsatermica", "#marmita", "#fitness", "#vidasaudavel",
-        "#dieta", "#marmitafit", "#trabalho", "#viagem", "#pratica",
-        "#funcional", "#organizacao", "#rotina",
+        "#bolsatermica", "#marmita", "#marmitafit", "#fitness",
+        "#vidasaudavel", "#dieta", "#trabalho", "#viagem", "#pratica",
+        "#funcional", "#organizacao",
     ],
     "geral": [
         "#dica", "#recomendacao", "#indicacao", "#testei", "#aprovado",
@@ -100,7 +95,6 @@ TAGS_CAT = {
     ],
 }
 
-# Hashtags de alcance — genéricas, sem associação com plataforma
 TAGS_ALCANCE = [
     "#viral", "#viralvideo", "#trending", "#tendencia",
     "#achados", "#achadinhos", "#achadosdodia",
@@ -109,28 +103,27 @@ TAGS_ALCANCE = [
 
 
 # ══════════════════════════════════════════════════════════════
-# DETECÇÃO DE CATEGORIA — a partir do TÍTULO REAL do produto
+# DETECÇÃO DE CATEGORIA
 # ══════════════════════════════════════════════════════════════
 
 CAT_RULES = [
-    # Ordem: específicos primeiro
-    ("fone_audio",      r"fone|bluetooth|caixa\s*de?\s*som|headset|earbuds|headphone|airdopes|jbl|airpods"),
-    ("smartwatch",      r"smart\s*watch|smartband|rel[oó]gio\s*digital|rel[oó]gio\s*smart|mi\s*band|xiaomi\s*watch|galaxy\s*watch"),
-    ("lingerie",        r"camisola|lingerie|calcinha|sutia|suti[aã]|conjunto\s*[ií]ntimo|baby\s*doll|tule|renda\b"),
-    ("perfume",         r"perfume|fragrance|body\s*splash|col[oô]nia|eau\s*de\s*(parfum|toilette)"),
-    ("maquiagem",       r"maquiagem|batom|base\b|r[ií]mel|sombra|delineador|blush|iluminador|corretivo|pincel|paleta|labial"),
-    ("skincare",        r"skincare|hidratante|protetor\s*solar|s[eé]rum|[aá]cido|retinol|niacinamida|vitamina\s*c|esfoliante"),
-    ("cabelo",          r"shampoo|condicionador|escova|chapinha|secador|hidratante\s*capilar|m[aá]scara\s*capilar|creme\s*cabelo|prancha"),
-    ("bolsa_termica",   r"bolsa\s*t[eé]rmica|marmita|mochila\s*t[eé]rmica|termo|garrafa\s*t[eé]rmica"),
-    ("bolsa_mochila",   r"bolsa\b|mochila|necessaire|pochete|fanny\s*pack|bag\b"),
-    ("cozinha",         r"panela|frigideira|utens[ií]lio|talher|prato|copo|x[ií]cara|t[aá]bua|esp[aá]tula|organizador\s*cozinha|airfryer"),
-    ("casa",            r"decora[cç][aã]o|tapete|cortina|lumin[aá]ria|banheiro|lixeira|almofada|coberta|edredom|travesseiro|prateleira"),
-    ("esporte",         r"fitness|treino|academia|gym|corrida|bicicleta|yoga|haltere|el[aá]stico|squeeze|whey|creatina|caneleira"),
-    ("bebe",            r"beb[eê]|infantil|crian[cç]a|fralda|mamadeira|chupeta|ber[cç]o|carrinho|enxoval|macac[aã]o"),
-    ("pet",             r"cachorro|gato|petisco|ra[cç][aã]o|coleira|comedouro|bebedouro"),
-    ("moda_feminina",   r"vestido|saia\b|shorts\s*feminino|cropped|blusa\s*feminina|conjunto\s*feminino"),
-    ("moda",            r"roupa|camiseta|camisa|jaqueta|casaco|moletom|t[eê]nis|bota|sand[aá]lia|chinelo|bon[eé]|[oó]culos|bermuda"),
-    ("eletronicos",     r"carregador|cabo\s*usb|cabo\s*tipo\s*c|led|camera|drone|mouse|teclado|powerbank|notebook|tablet|celular|capinha|controle|microfone"),
+    ("fone_audio",     r"fone|bluetooth|caixa\s*de?\s*som|headset|earbuds|headphone|airdopes|jbl|airpods"),
+    ("smartwatch",     r"smart\s*watch|smartband|rel[oó]gio\s*digital|rel[oó]gio\s*smart|mi\s*band|xiaomi\s*watch"),
+    ("lingerie",       r"camisola|lingerie|calcinha|sutia|suti[aã]|baby\s*doll|tule|renda\b"),
+    ("perfume",        r"perfume|fragrance|body\s*splash|col[oô]nia"),
+    ("maquiagem",      r"maquiagem|batom|base\b|r[ií]mel|sombra|delineador|blush|iluminador|corretivo|pincel|paleta|labial"),
+    ("skincare",       r"skincare|hidratante|protetor\s*solar|s[eé]rum|[aá]cido|retinol|niacinamida"),
+    ("cabelo",         r"shampoo|condicionador|chapinha|secador|hidratante\s*capilar|m[aá]scara\s*capilar|prancha"),
+    ("bolsa_termica",  r"bolsa\s*t[eé]rmica|marmita|termo|garrafa\s*t[eé]rmica"),
+    ("bolsa_mochila",  r"bolsa\b|mochila|necessaire|pochete|bag\b"),
+    ("cozinha",        r"panela|frigideira|utens[ií]lio|talher|prato|copo|x[ií]cara|airfryer"),
+    ("casa",           r"decora[cç][aã]o|tapete|cortina|lumin[aá]ria|banheiro|lixeira|almofada|coberta|edredom|travesseiro"),
+    ("esporte",        r"fitness|treino|academia|gym|corrida|bicicleta|yoga|haltere|el[aá]stico|squeeze|whey|creatina"),
+    ("bebe",           r"beb[eê]|infantil|crian[cç]a|fralda|mamadeira|chupeta|ber[cç]o|carrinho|enxoval|macac[aã]o"),
+    ("pet",            r"cachorro|gato|petisco|ra[cç][aã]o|coleira|comedouro"),
+    ("moda_feminina",  r"vestido|saia\b|shorts\s*feminino|cropped|blusa\s*feminina|conjunto\s*feminino"),
+    ("moda",           r"roupa|camiseta|camisa|jaqueta|casaco|moletom|t[eê]nis|bota|sand[aá]lia|chinelo|bon[eé]|[oó]culos"),
+    ("eletronicos",    r"carregador|cabo\s*usb|led|camera|drone|mouse|teclado|powerbank|notebook|tablet|celular|capinha|controle|microfone"),
 ]
 
 
@@ -161,7 +154,6 @@ def can_download(plat): return plat in VIDEO_OK
 
 
 def detect_category(text: str) -> str:
-    """Detecta categoria do produto baseado no texto (título ou descrição)."""
     if not text: return "geral"
     t = text.lower()
     for cat, pat in CAT_RULES:
@@ -171,34 +163,26 @@ def detect_category(text: str) -> str:
 
 
 def extract_product_name(text: str) -> str:
-    """Tenta extrair um nome legível do produto, priorizando texto real sobre URL."""
     if not text:
         return "esse produto"
     text = text.strip()
-
-    # Se tem texto legível (não é URL), usar diretamente
-    if not re.match(r'https?://', text, re.I):
-        # Limpar emojis e pontuação excessiva
-        clean = re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE)
-        clean = re.sub(r'\s+', ' ', clean).strip()
-        # Pegar primeiras palavras úteis (3-6 palavras)
+    if not re.match(r"https?://", text, re.I):
+        clean = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+        clean = re.sub(r"\s+", " ", clean).strip()
         words = clean.split()[:6]
-        if words:
-            return " ".join(words)
-        return "esse produto"
+        return " ".join(words) if words else "esse produto"
 
-    # Extrair de URL
     try:
         path = unquote(urlparse(text).pathname)
-        stop = {'com', 'br', 'www', 'shopee', 'product', 'item', 'video',
-                'html', 'php', 'i', 'p', 'reel', 'watch', 'shorts', 'pin',
-                'share', 'universal', 'link', 'redir'}
+        stop = {"com", "br", "www", "shopee", "product", "item", "video",
+                "html", "php", "i", "p", "reel", "watch", "shorts", "pin",
+                "share", "universal", "link", "redir", "deep", "web"}
         words = []
-        for w in re.split(r'[-_/.]', path):
+        for w in re.split(r"[-_/.]", path):
             w = w.strip()
             if (len(w) > 2 and not w.isdigit() and
                 w.lower() not in stop and
-                not re.match(r'^[a-f0-9]{8,}$', w, re.I)):
+                not re.match(r"^[a-f0-9]{8,}$", w, re.I)):
                 words.append(w)
         if words:
             return " ".join(words[:5])
@@ -207,13 +191,13 @@ def extract_product_name(text: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
-# LEGENDAS VIRAIS — 12 fórmulas
+# LEGENDAS VIRAIS
 # ══════════════════════════════════════════════════════════════
 
 CAT_LABEL = {
     "fone_audio": "fone", "smartwatch": "relógio", "lingerie": "peça",
     "perfume": "perfume", "maquiagem": "produto de make", "skincare": "produto de skincare",
-    "cabelo": "produto de cabelo", "cozinha": "utensílio", "casa": "item",
+    "cabelo": "produto pra cabelo", "cozinha": "utensílio", "casa": "item",
     "esporte": "acessório fitness", "bebe": "item de bebê", "pet": "produto pet",
     "bolsa_mochila": "bolsa", "bolsa_termica": "bolsa térmica",
     "moda_feminina": "peça", "moda": "peça", "eletronicos": "gadget",
@@ -242,7 +226,6 @@ def _gen_caption(nome: str, cat: str) -> str:
 
 
 def _gen_hashtags(cat: str, extra_words: list = None) -> str:
-    """Gera hashtags da categoria + palavras extras relevantes do título."""
     cat_tags = TAGS_CAT.get(cat, TAGS_CAT["geral"])
     cat_selected = random.sample(cat_tags, min(10, len(cat_tags)))
 
@@ -251,15 +234,14 @@ def _gen_hashtags(cat: str, extra_words: list = None) -> str:
 
     alcance = random.sample(TAGS_ALCANCE, 5)
 
-    # Hashtags extras do título (palavras reais do produto)
     extra_tags = []
     if extra_words:
         for word in extra_words:
-            w = re.sub(r'[^a-z0-9]', '', word.lower())
+            w = re.sub(r"[^a-z0-9]", "", word.lower())
             if 3 <= len(w) <= 20 and w not in {
                 "com", "para", "que", "esse", "essa", "este", "esta",
                 "produto", "link", "bio", "comenta", "shopee", "tiktok",
-                "instagram", "video", "novo", "nova"
+                "instagram", "video", "novo", "nova", "dalila"
             }:
                 tag = f"#{w}"
                 if tag not in extra_tags:
@@ -281,15 +263,7 @@ def _gen_hashtags(cat: str, extra_words: list = None) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def generate(text: str, metadata: dict = None) -> dict:
-    """
-    Gera legenda + hashtags.
-
-    Args:
-        text: URL ou texto livre
-        metadata: dict opcional com 'title', 'caption', 'product_name',
-                  'username' (extraídos do Playwright pra Shopee)
-    """
-    # Priorizar metadata real do vídeo sobre URL
+    """Gera legenda + 3 variações de hashtags."""
     source_text = ""
     extra_words = []
 
@@ -298,8 +272,7 @@ def generate(text: str, metadata: dict = None) -> dict:
             v = metadata.get(key)
             if v and len(str(v)) > 3:
                 source_text = str(v)
-                # Extrair palavras significativas para hashtags extras
-                words = re.findall(r'\b[a-záéíóúãõâêôç]{3,20}\b',
+                words = re.findall(r"\b[a-záéíóúãõâêôç]{3,20}\b",
                                    source_text.lower())
                 extra_words = words[:8]
                 break
@@ -312,7 +285,6 @@ def generate(text: str, metadata: dict = None) -> dict:
 
     caption = _gen_caption(nome, cat)
 
-    # 3 variações de hashtags
     h1 = _gen_hashtags(cat, extra_words)
     h2 = _gen_hashtags(cat, extra_words)
     h3 = _gen_hashtags(cat, extra_words)
