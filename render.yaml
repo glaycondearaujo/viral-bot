@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: viral-engine-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard  # standard (2GB) recomendado. starter ($7, 512MB) pode crashar.
+    region: oregon  # oregon/frankfurt/ohio/singapore - escolha o mais próximo
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # você define manualmente no dashboard
+      - key: PORT
+        value: 10000
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    autoDeploy: true
