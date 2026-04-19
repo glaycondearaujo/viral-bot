@@ -1,5 +1,5 @@
-# Imagem oficial do Playwright Python — já vem com Chromium + libs
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+# Imagem oficial do Playwright Python — versão travada igual ao requirements.txt
+FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 # Instalar ffmpeg para post-processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,6 +11,9 @@ WORKDIR /app
 # Instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+# Garantir que o Chromium do Playwright está instalado no caminho correto
+RUN playwright install chromium
 
 # yt-dlp mais recente (atualiza sempre no build)
 RUN pip install --no-cache-dir --break-system-packages --upgrade yt-dlp
